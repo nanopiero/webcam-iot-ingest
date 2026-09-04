@@ -25,6 +25,7 @@ from ingestion.shared.provider_access import (
     ProviderImageAccessError,
     ProviderImageClient,
 )
+from ingestion.shared.path_timestamp import timestamp_from_path
 from ingestion.shared.source_image_validation import (
     InvalidSourceImageError,
     validate_source_image,
@@ -89,6 +90,7 @@ def process_job(
     name = name_value if isinstance(name_value, str) else None
     download_timestamp: datetime | None = None
     provider_update_timestamp: datetime | None = None
+    provider_url_timestamp: datetime | None = None
     provider_to_download_s: float | None = None
     observed_marker: str | None = None
     period_candidate: PeriodEstimateCandidate | None = None
@@ -264,12 +266,19 @@ def process_job(
             and hasattr(reference, "resolved_target_path")
             else None
         )
+        if job.network_id == "ska" and hasattr(reference, "resolved_target_path"):
+            timezone_name = job.site_metadata.get("time_zone")
+            provider_url_timestamp = timestamp_from_path(
+                reference.resolved_target_path,
+                timezone_name if isinstance(timezone_name, str) else None,
+            )
         if storage is not None and publisher is not None:
             prepared = prepare_publication(
                 job=job,
                 source=source,
                 download_timestamp=download_timestamp,
                 provider_update_timestamp=provider_update_timestamp,
+                provider_url_timestamp=provider_url_timestamp,
                 source_image_provider_metadata=source_provider_metadata,
                 transformation=selected_transformation,
                 storage=storage,
@@ -288,6 +297,7 @@ def process_job(
                 source=source,
                 download_timestamp=download_timestamp,
                 provider_update_timestamp=provider_update_timestamp,
+                provider_url_timestamp=provider_url_timestamp,
                 source_image_provider_metadata=source_provider_metadata,
                 transformation=selected_transformation,
             )

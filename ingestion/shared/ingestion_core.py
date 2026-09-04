@@ -44,6 +44,7 @@ def prepare_publication(
     source: SourceImage,
     download_timestamp: datetime,
     provider_update_timestamp: datetime | None,
+    provider_url_timestamp: datetime | None = None,
     transformation: TransformationConfig,
     storage: S3Storage,
     source_image_provider_metadata: dict[str, object] | None = None,
@@ -68,6 +69,7 @@ def prepare_publication(
         stored=stored,
         download_timestamp=download_timestamp,
         provider_update_timestamp=provider_update_timestamp,
+        provider_url_timestamp=provider_url_timestamp,
         source_image_provider_metadata=source_image_provider_metadata,
     )
     return PreparedPublication(
@@ -81,6 +83,7 @@ def process_source_image(
     source: SourceImage,
     download_timestamp: datetime,
     provider_update_timestamp: datetime | None,
+    provider_url_timestamp: datetime | None = None,
     transformation: TransformationConfig,
     source_image_provider_metadata: dict[str, object] | None = None,
     storage: S3Storage | None = None,
@@ -102,6 +105,7 @@ def process_source_image(
         source=source,
         download_timestamp=download_timestamp,
         provider_update_timestamp=provider_update_timestamp,
+        provider_url_timestamp=provider_url_timestamp,
         source_image_provider_metadata=source_image_provider_metadata,
         transformation=transformation,
         storage=storage,

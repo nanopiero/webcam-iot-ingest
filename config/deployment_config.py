@@ -701,7 +701,7 @@ class TransformationConfig:
                 os.getenv("TARGET_PANORAMIC_IMAGE_SIZE_BYTES", "200000")
             ),
             panoramic_aspect_ratio=float(
-                os.getenv("PANORAMIC_ASPECT_RATIO_THRESHOLD", "2.0")
+                os.getenv("PANORAMIC_ASPECT_RATIO_THRESHOLD", "1.8")
             ),
         )
         config.validate()

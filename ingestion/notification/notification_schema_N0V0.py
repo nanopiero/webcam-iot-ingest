@@ -24,6 +24,7 @@ def build_notification(
     stored: StoredObject,
     download_timestamp: datetime,
     provider_update_timestamp: datetime | None,
+    provider_url_timestamp: datetime | None = None,
     source_image_provider_metadata: dict[str, Any] | None = None,
     publication_timestamp: datetime | None = None,
 ) -> dict[str, Any]:
@@ -32,7 +33,6 @@ def build_notification(
     return {
         "schema_version": SCHEMA_VERSION,
         "image_id": image_id,
-        "url": stored.url,
         "storage": {
             "type": "s3",
             "bucket": stored.bucket,
@@ -56,6 +56,9 @@ def build_notification(
             "provider_stream_id": job.provider_source_stream_id,
             "latitude": source_stream_latitude,
             "longitude": source_stream_longitude,
+            "name": _source_stream_name(job),
+            "tags": _semantic_tags(job),
+            "downstream_user_connexion_infos": _downstream_connection_info(job),
             "provider_metadata": job.source_stream_metadata,
         },
         "derived_stream": {
@@ -70,6 +73,7 @@ def build_notification(
         "timestamps": {
             "download_timestamp": _timestamp(download_timestamp),
             "provider_update_timestamp": _timestamp(provider_update_timestamp),
+            "provider_url_timestamp": _timestamp(provider_url_timestamp),
             "publication_timestamp": _timestamp(published),
         },
         "source_image": {
@@ -108,6 +112,67 @@ def _source_stream_coordinates(job: DueSourceStream) -> tuple[float, float]:
                 latitude = float(camera_latitude)
                 longitude = float(camera_longitude)
     return latitude, longitude
+
+
+def _semantic_tags(job: DueSourceStream) -> list[str]:
+    if job.network_id == "win":
+        return _string_list(job.source_stream_metadata.get("categories"))
+    if job.network_id == "fin":
+        properties = job.site_metadata.get("properties")
+        purpose = properties.get("purpose") if isinstance(properties, dict) else None
+        return _string_list(purpose)
+    if job.network_id == "ska":
+        return _string_list(job.source_stream_metadata.get("tags"))
+    return []
+
+
+def _source_stream_name(job: DueSourceStream) -> str | None:
+    stream_metadata = job.source_stream_metadata
+    if job.network_id == "win":
+        return _nonempty_string(stream_metadata.get("title"))
+    if job.network_id == "fin":
+        properties = job.site_metadata.get("properties")
+        station_name = (
+            _nonempty_string(properties.get("name"))
+            if isinstance(properties, dict)
+            else None
+        )
+        presentation_name = _nonempty_string(
+            stream_metadata.get("presentationName")
+        )
+        return " --- ".join(
+            value for value in (station_name, presentation_name) if value
+        ) or None
+    if job.network_id == "ska":
+        return _nonempty_string(stream_metadata.get("title")) or ""
+    return None
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return list(dict.fromkeys(part for part in value.split() if part))
+    if isinstance(value, (list, tuple)):
+        return list(
+            dict.fromkeys(
+                item.strip()
+                for item in value
+                if isinstance(item, str) and item.strip()
+            )
+        )
+    return []
+
+
+def _downstream_connection_info(job: DueSourceStream) -> str | None:
+    if job.network_id == "win":
+        return "useAPI"
+    metadata_key = {"fin": "imageUrl", "ska": "url"}.get(job.network_id)
+    if metadata_key is None:
+        return None
+    return _nonempty_string(job.source_stream_metadata.get(metadata_key))
+
+
+def _nonempty_string(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _timestamp(value: datetime | None) -> str | None:

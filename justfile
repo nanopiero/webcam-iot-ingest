@@ -64,6 +64,13 @@ cleanup-spool older_than_hours *args:
     shift
     exec just container-cleanup-spool "$older_than_hours" "$@"
 
+# Sample retained canonical S3 images and summarize their aspect ratios.
+sample-s3-aspect-ratios *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec docker compose --env-file .env --profile jobs run --rm \
+        webcam-job python -m storage.s3_image_aspect_ratios "$@"
+
 # Create a timestamped full PostgreSQL dump in the configured S3 bucket.
 # Add --dry-run to validate configuration and inspect the future key.
 backup-database *args:
