@@ -137,6 +137,12 @@ container-stack-up:
 container-stack-stop:
     docker compose --env-file .env --profile application --profile monitoring stop
 
+# Run one selected short-lived maintenance task through the shared runner.
+maintenance task:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec deployment/maintenance/run "$1"
+
 # Run one provider discovery in the shared short-lived application container.
 container-discover network *args:
     #!/usr/bin/env bash

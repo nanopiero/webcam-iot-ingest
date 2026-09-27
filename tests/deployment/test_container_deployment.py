@@ -163,13 +163,14 @@ def test_systemd_only_orchestrates_compose_and_scheduled_jobs() -> None:
     directory = ROOT / "deployment/systemd/pilot"
     stack = (directory / "webcam-stack.service").read_text()
     maintenance_timer = (directory / "webcam-maintenance.timer").read_text()
-    maintenance = (directory / "run-maintenance-sequence").read_text()
+    maintenance = (ROOT / "deployment/maintenance/run").read_text()
+    daily_service = (directory / "webcam-maintenance-sequence.service").read_text()
+    cleanup_service = (directory / "webcam-spool-cleanup.service").read_text()
 
     assert "--profile application --profile monitoring up -d" in stack
     assert "python -m ingestion" not in stack
     assert "OnCalendar=*-*-* 00:00:00 UTC" in maintenance_timer
     expected = [
-        "storage.s3_spool_cleanup",
         "run-discovery windy",
         "run-discovery fintraffic",
         "run-discovery skaping",
@@ -178,6 +179,11 @@ def test_systemd_only_orchestrates_compose_and_scheduled_jobs() -> None:
     positions = [maintenance.index(value) for value in expected]
     assert positions == sorted(positions)
     assert "flock -n" in maintenance
+    assert "daily|cleanup" in maintenance
+    assert "deployment/maintenance/run daily" in daily_service
+    assert "deployment/maintenance/run cleanup" in cleanup_service
+    assert "webcam-stack.service" not in daily_service
+    assert "webcam-stack.service" not in cleanup_service
 
 
 def test_operational_just_recipes_use_container_jobs() -> None:
@@ -192,6 +198,8 @@ def test_operational_just_recipes_use_container_jobs() -> None:
     assert "container-discover skaping" in operational
     assert "container-cleanup-spool" in operational
     assert "container-backup-database" in operational
+    assert "maintenance task:" in operational
+    assert 'deployment/maintenance/run "$1"' in operational
     assert "ingestion.windy.windy_ingestion_workflow" in justfile
 
 

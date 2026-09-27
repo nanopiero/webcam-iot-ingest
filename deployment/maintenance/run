@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+task="${1:-}"
+case "$task" in
+    daily|cleanup) ;;
+    *)
+        echo "maintenance task must be daily or cleanup" >&2
+        exit 2
+        ;;
+esac
+
+lock_file="${WEBCAM_MAINTENANCE_LOCK_FILE:-/tmp/webcam-maintenance-$(id -u).lock}"
+pushgateway="${WEBCAM_PUSHGATEWAY_URL:-http://127.0.0.1:9091}"
+status=0
+
+if ! exec 9>"$lock_file"; then
+    echo "{\"maintenance_task\":{\"task\":\"$task\",\"outcome\":\"lock_error\"}}" >&2
+    exit 73
+fi
+if ! flock -n 9; then
+    echo "{\"maintenance_task\":{\"task\":\"$task\",\"outcome\":\"already_running\"}}"
+    exit 75
+fi
+
+publish_step() {
+    local step="$1"
+    local result="$2"
+    local duration="$3"
+    local timestamp="$4"
+    curl --fail --silent --show-error --max-time 5 \
+        --data-binary @- \
+        "$pushgateway/metrics/job/webcam_maintenance_task/task/$task/step/$step" <<EOF || true
+# TYPE webcam_maintenance_step_last_run_unixtime gauge
+webcam_maintenance_step_last_run_unixtime{result="$result"} $timestamp
+# TYPE webcam_maintenance_step_last_duration_seconds gauge
+webcam_maintenance_step_last_duration_seconds{result="$result"} $duration
+EOF
+}
+
+publish_task() {
+    local result="$1"
+    local duration="$2"
+    local timestamp="$3"
+    curl --fail --silent --show-error --max-time 5 \
+        --data-binary @- \
+        "$pushgateway/metrics/job/webcam_maintenance_task/task/$task" <<EOF || true
+# TYPE webcam_maintenance_task_last_run_unixtime gauge
+webcam_maintenance_task_last_run_unixtime{result="$result"} $timestamp
+# TYPE webcam_maintenance_task_last_duration_seconds gauge
+webcam_maintenance_task_last_duration_seconds{result="$result"} $duration
+EOF
+    if [[ "$task" == "daily" ]]; then
+        curl --fail --silent --show-error --max-time 5 \
+            --data-binary @- \
+            "$pushgateway/metrics/job/webcam_maintenance_sequence" <<EOF || true
+# TYPE webcam_maintenance_sequence_last_run_unixtime gauge
+webcam_maintenance_sequence_last_run_unixtime{result="$result"} $timestamp
+# TYPE webcam_maintenance_sequence_last_duration_seconds gauge
+webcam_maintenance_sequence_last_duration_seconds{result="$result"} $duration
+EOF
+    fi
+}
+
+run_step() {
+    local step="$1"
+    local timeout_s="$2"
+    shift 2
+    local started ended result
+    started="$(date +%s)"
+    echo "{\"maintenance_step\":{\"task\":\"$task\",\"step\":\"$step\",\"event\":\"started\",\"timestamp\":$started}}"
+    if timeout --signal=TERM --kill-after=30s "${timeout_s}s" "$@"; then
+        result="success"
+    else
+        result="failure"
+        status=1
+    fi
+    ended="$(date +%s)"
+    publish_step "$step" "$result" "$((ended - started))" "$ended"
+    echo "{\"maintenance_step\":{\"task\":\"$task\",\"step\":\"$step\",\"event\":\"completed\",\"result\":\"$result\",\"duration_s\":$((ended - started)),\"timestamp\":$ended}}"
+}
+
+task_started="$(date +%s)"
+case "$task" in
+    daily)
+        run_step discovery_windy "${WEBCAM_WINDY_DISCOVERY_TIMEOUT_S:-1800}" \
+            deployment/systemd/pilot/run-discovery windy
+        run_step discovery_fintraffic "${WEBCAM_FINTRAFFIC_DISCOVERY_TIMEOUT_S:-900}" \
+            deployment/systemd/pilot/run-discovery fintraffic
+        run_step discovery_skaping "${WEBCAM_SKAPING_DISCOVERY_TIMEOUT_S:-300}" \
+            deployment/systemd/pilot/run-discovery skaping
+        run_step database_backup "${WEBCAM_DATABASE_BACKUP_TIMEOUT_S:-1800}" \
+            docker compose --env-file .env --profile jobs run --rm \
+            webcam-job python -m database.database_backup --pg-dump-mode direct
+        ;;
+    cleanup)
+        run_step spool_cleanup "${WEBCAM_CLEANUP_TIMEOUT_S:-3600}" \
+            docker compose --env-file .env --profile jobs run --rm \
+            webcam-job python -m storage.s3_spool_cleanup \
+            --older-than-hours "${WEBCAM_SPOOL_RETENTION_HOURS:-24}" \
+            --transformation-prefix "${WEBCAM_TRANSFORMATION_PREFIX:-T0}"
+        ;;
+esac
+
+task_ended="$(date +%s)"
+if ((status == 0)); then
+    task_result="success"
+else
+    task_result="failure"
+fi
+publish_task "$task_result" "$((task_ended - task_started))" "$task_ended"
+echo "{\"maintenance_task\":{\"task\":\"$task\",\"result\":\"$task_result\",\"duration_s\":$((task_ended - task_started)),\"timestamp\":$task_ended}}"
+exit "$status"

@@ -4,7 +4,7 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "deployment/systemd/pilot/run-maintenance-sequence"
+SCRIPT = ROOT / "deployment/maintenance/run"
 
 
 def _executable(path: Path, content: str) -> None:
@@ -23,7 +23,10 @@ echo "$*" >> "$COMMAND_LOG"
 if [[ "$*" == *"$FAIL_MATCH"* ]]; then exit 1; fi
 """,
     )
-    _executable(binary / "curl", "#!/usr/bin/env bash\ncat >/dev/null\n")
+    _executable(
+        binary / "curl",
+        '#!/usr/bin/env bash\necho "curl:$*" >> "$COMMAND_LOG"\ncat >/dev/null\n',
+    )
     environment = os.environ.copy()
     environment.update(
         {
@@ -31,7 +34,6 @@ if [[ "$*" == *"$FAIL_MATCH"* ]]; then exit 1; fi
             "COMMAND_LOG": str(commands),
             "FAIL_MATCH": "discovery.windy.windy_discovery_workflow",
             "WEBCAM_MAINTENANCE_LOCK_FILE": str(tmp_path / "maintenance.lock"),
-            "WEBCAM_CLEANUP_TIMEOUT_S": "5",
             "WEBCAM_WINDY_DISCOVERY_TIMEOUT_S": "5",
             "WEBCAM_FINTRAFFIC_DISCOVERY_TIMEOUT_S": "5",
             "WEBCAM_SKAPING_DISCOVERY_TIMEOUT_S": "5",
@@ -40,17 +42,23 @@ if [[ "$*" == *"$FAIL_MATCH"* ]]; then exit 1; fi
     )
 
     completed = subprocess.run(
-        [str(SCRIPT)], cwd=ROOT, env=environment, capture_output=True, text=True
+        [str(SCRIPT), "daily"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
     )
 
     assert completed.returncode == 1
     log = commands.read_text(encoding="utf-8")
-    cleanup = log.index("storage.s3_spool_cleanup")
     windy = log.index("discovery.windy.windy_discovery_workflow")
     fintraffic = log.index("discovery.fintraffic.fintraffic_discovery_workflow")
     skaping = log.index("discovery.skaping.skaping_discovery_workflow")
     backup = log.index("database.database_backup")
-    assert cleanup < windy < fintraffic < skaping < backup
+    assert windy < fintraffic < skaping < backup
+    assert "storage.s3_spool_cleanup" not in log
+    assert log.count("webcam-job") == 4
+    assert "/task/daily" in log
     assert '"step":"discovery_windy"' in completed.stdout
     assert '"result":"failure"' in completed.stdout
 
@@ -68,7 +76,7 @@ def test_lock_prevents_overlapping_sequence(tmp_path: Path):
     assert holder.stdout.readline().strip() == "ready"
     try:
         completed = subprocess.run(
-            [str(SCRIPT)],
+            [str(SCRIPT), "daily"],
             cwd=ROOT,
             env=environment,
             capture_output=True,
@@ -79,6 +87,7 @@ def test_lock_prevents_overlapping_sequence(tmp_path: Path):
         holder.wait(timeout=5)
 
     assert completed.returncode == 75
+    assert '"task":"daily"' in completed.stdout
     assert "already_running" in completed.stdout
 
 
@@ -87,7 +96,7 @@ def test_unwritable_lock_has_distinct_error(tmp_path: Path):
     environment["WEBCAM_MAINTENANCE_LOCK_FILE"] = str(tmp_path / "missing" / "lock")
 
     completed = subprocess.run(
-        [str(SCRIPT)],
+        [str(SCRIPT), "daily"],
         cwd=ROOT,
         env=environment,
         capture_output=True,
@@ -96,3 +105,57 @@ def test_unwritable_lock_has_distinct_error(tmp_path: Path):
 
     assert completed.returncode == 73
     assert "lock_error" in completed.stderr
+
+
+def test_cleanup_selects_only_spool_cleanup(tmp_path: Path):
+    commands = tmp_path / "commands.log"
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    _executable(
+        binary / "docker",
+        '#!/usr/bin/env bash\necho "$*" >> "$COMMAND_LOG"\n',
+    )
+    _executable(
+        binary / "curl",
+        '#!/usr/bin/env bash\necho "curl:$*" >> "$COMMAND_LOG"\ncat >/dev/null\n',
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{binary}:{environment['PATH']}",
+            "COMMAND_LOG": str(commands),
+            "WEBCAM_MAINTENANCE_LOCK_FILE": str(tmp_path / "maintenance.lock"),
+            "WEBCAM_CLEANUP_TIMEOUT_S": "5",
+            "WEBCAM_SPOOL_RETENTION_HOURS": "7",
+        }
+    )
+
+    completed = subprocess.run(
+        [str(SCRIPT), "cleanup"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    log = commands.read_text(encoding="utf-8")
+    assert "storage.s3_spool_cleanup" in log
+    assert "--older-than-hours 7" in log
+    assert log.count("webcam-job") == 1
+    assert "discovery." not in log
+    assert "database.database_backup" not in log
+    assert "/task/cleanup" in log
+    assert '"task":"cleanup"' in completed.stdout
+
+
+def test_unknown_maintenance_task_is_rejected():
+    completed = subprocess.run(
+        [str(SCRIPT), "unknown"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert "must be daily or cleanup" in completed.stderr

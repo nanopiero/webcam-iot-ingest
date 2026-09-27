@@ -1,12 +1,12 @@
 [Unit]
-Description=Cleanup-first failure-tolerant webcam maintenance sequence
-Requires=webcam-stack.service
-After=webcam-stack.service network-online.target
+Description=Failure-tolerant daily webcam discovery and database backup
+Requires=docker.service
+After=docker.service network-online.target
 
 [Service]
 Type=oneshot
 User=codexuser
 Group=codexuser
 WorkingDirectory=/home/codexuser/src/webcam-iot-ingest
-ExecStart=/home/codexuser/src/webcam-iot-ingest/deployment/systemd/pilot/run-maintenance-sequence
+ExecStart=/home/codexuser/src/webcam-iot-ingest/deployment/maintenance/run daily
 TimeoutStartSec=infinity
