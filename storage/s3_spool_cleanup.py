@@ -21,6 +21,7 @@ _IMAGE_KEY = re.compile(
     r"(?P<year>\d{4})/(?P<month>\d{2})/(?P<day>\d{2})/(?P<hour>\d{2})/"
     r"(?P<timestamp>\d{8}T\d{6}Z)_[^/]+\.jpg$"
 )
+_DELETE_BATCH_SIZE = 1000
 
 
 @dataclass
@@ -79,7 +80,10 @@ def image_download_timestamp(
 
 def _objects(client: Any, bucket: str, prefix: str) -> Iterator[dict[str, Any]]:
     paginator = client.get_paginator("list_objects_v2")
-    kwargs = {"Bucket": bucket}
+    kwargs = {
+        "Bucket": bucket,
+        "PaginationConfig": {"PageSize": _DELETE_BATCH_SIZE},
+    }
     if prefix:
         kwargs["Prefix"] = f"{prefix.strip('/')}/"
     for page in paginator.paginate(**kwargs):
@@ -110,6 +114,10 @@ def cleanup_spool(
         raise ValueError("retention must be positive")
     if limit is not None and limit < 1:
         raise ValueError("limit must be positive")
+    if include_keys and (limit is None or limit > _DELETE_BATCH_SIZE):
+        raise ValueError(
+            "including selected keys requires a limit between 1 and 1000"
+        )
     if not all_transformation_prefixes and not re.fullmatch(
         r"[A-Za-z0-9]{1,16}", transformation_prefix
     ):
@@ -129,6 +137,41 @@ def cleanup_spool(
     started = time.monotonic()
     listing_started = time.monotonic()
     candidates: list[tuple[str, int, bool]] = []
+    deletion_duration = 0.0
+
+    def flush_candidates() -> None:
+        nonlocal deletion_duration
+        if not candidates:
+            return
+        if dry_run:
+            candidates.clear()
+            return
+        deletion_started = time.monotonic()
+        try:
+            response = client.delete_objects(
+                Bucket=config.bucket,
+                Delete={
+                    "Objects": [{"Key": key} for key, _, _ in candidates],
+                    "Quiet": False,
+                },
+            )
+        finally:
+            deletion_duration += time.monotonic() - deletion_started
+        deleted_keys = {row["Key"] for row in response.get("Deleted", ())}
+        error_keys = {row["Key"] for row in response.get("Errors", ())}
+        result.deleted += len(deleted_keys)
+        result.failed += len(error_keys)
+        sizes = {key: size for key, size, _ in candidates}
+        result.deleted_bytes += sum(sizes[key] for key in deleted_keys)
+        malformed_keys = {
+            key for key, _, malformed in candidates if malformed
+        }
+        result.malformed_deleted += len(deleted_keys & malformed_keys)
+        result.failed += max(
+            0, len(candidates) - len(deleted_keys) - len(error_keys)
+        )
+        candidates.clear()
+
     try:
         listing_prefix = config.prefix
         if not all_transformation_prefixes:
@@ -166,40 +209,40 @@ def cleanup_spool(
                 result.eligible_bytes += size
                 if malformed:
                     result.malformed_eligible += 1
-                if limit is not None and len(candidates) >= limit:
+                if len(candidates) == _DELETE_BATCH_SIZE:
+                    flush_candidates()
+                if limit is not None and result.eligible >= limit:
                     break
-        listing_duration = time.monotonic() - listing_started
-        deletion_started = time.monotonic()
-        if not dry_run:
-            for offset in range(0, len(candidates), 1000):
-                batch = candidates[offset : offset + 1000]
-                response = client.delete_objects(
-                    Bucket=config.bucket,
-                    Delete={
-                        "Objects": [{"Key": key} for key, _, _ in batch],
-                        "Quiet": False,
-                    },
-                )
-                deleted_keys = {row["Key"] for row in response.get("Deleted", ())}
-                error_keys = {row["Key"] for row in response.get("Errors", ())}
-                result.deleted += len(deleted_keys)
-                result.failed += len(error_keys)
-                sizes = {key: size for key, size, _ in batch}
-                result.deleted_bytes += sum(sizes[key] for key in deleted_keys)
-                malformed_keys = {
-                    key for key, _, malformed in batch if malformed
-                }
-                result.malformed_deleted += len(deleted_keys & malformed_keys)
-                unreported = len(batch) - len(deleted_keys) - len(error_keys)
-                result.failed += max(0, unreported)
-        deletion_duration = time.monotonic() - deletion_started
+        flush_candidates()
+        listing_duration = max(
+            0.0, time.monotonic() - listing_started - deletion_duration
+        )
     except Exception:
         result.duration_seconds = time.monotonic() - started
         metrics.publish(
             success=False,
             duration_s=result.duration_seconds,
-            items={"examined": result.examined, "failed": result.failed + 1},
-            bytes_by_outcome={"eligible": result.eligible_bytes},
+            items={
+                "examined": result.examined,
+                "eligible": result.eligible,
+                "deleted": result.deleted,
+                "failed": result.failed + 1,
+                "skipped_unknown": result.skipped_unknown,
+                "malformed_eligible": result.malformed_eligible,
+                "malformed_deleted": result.malformed_deleted,
+            },
+            bytes_by_outcome={
+                "eligible": result.eligible_bytes,
+                "deleted": result.deleted_bytes,
+            },
+            stages={
+                "listing": max(
+                    0.0,
+                    time.monotonic() - listing_started - deletion_duration,
+                ),
+                "deletion": deletion_duration,
+            },
+            retention_hours=older_than_hours,
         )
         raise
     result.duration_seconds = time.monotonic() - started

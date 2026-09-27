@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from config.deployment_config import S3Config
 from storage.s3_spool_cleanup import cleanup_spool, image_download_timestamp
 
@@ -86,6 +88,7 @@ def test_cleanup_deletes_only_old_canonical_images():
         now=datetime(2026, 7, 24, 12, tzinfo=timezone.utc),
         client=Client(),
         metrics=metrics,
+        limit=1000,
         include_keys=True,
     )
     assert result.examined == 3
@@ -162,6 +165,7 @@ def test_scoped_cleanup_deletes_old_malformed_object_by_last_modified():
         now=datetime(2026, 7, 24, 12, tzinfo=timezone.utc),
         client=client,
         metrics=Metrics(),
+        limit=1000,
         include_keys=True,
     )
 
@@ -205,3 +209,116 @@ def test_bucket_wide_cleanup_does_not_delete_malformed_objects():
     assert result.deleted == 0
     assert result.skipped_unknown == 1
     assert result.malformed_deleted == 0
+
+
+def test_two_hour_retention_uses_a_strict_boundary():
+    class BoundaryPaginator:
+        def paginate(self, **kwargs):
+            return [
+                {
+                    "Contents": [
+                        {
+                            "Key": (
+                                "T0/win/2026/07/24/09/"
+                                "20260724T095959Z_beforeT0.jpg"
+                            ),
+                            "Size": 10,
+                        },
+                        {
+                            "Key": (
+                                "T0/win/2026/07/24/10/"
+                                "20260724T100000Z_exactT0.jpg"
+                            ),
+                            "Size": 20,
+                        },
+                        {
+                            "Key": (
+                                "T0/win/2026/07/24/10/"
+                                "20260724T100001Z_afterT0.jpg"
+                            ),
+                            "Size": 30,
+                        },
+                    ]
+                }
+            ]
+
+    client = Client()
+    client.get_paginator = lambda _name: BoundaryPaginator()
+    result = cleanup_spool(
+        config=config(),
+        older_than_hours=2,
+        dry_run=False,
+        now=datetime(2026, 7, 24, 12, tzinfo=timezone.utc),
+        client=client,
+        metrics=Metrics(),
+    )
+
+    assert result.cutoff_timestamp == "2026-07-24T10:00:00+00:00"
+    assert result.eligible == 1
+    assert result.deleted == 1
+    assert result.deleted_bytes == 10
+
+
+def test_cleanup_deletes_incrementally_in_bounded_batches():
+    object_count = 2005
+
+    class RecordingClient(Client):
+        def __init__(self):
+            self.batch_sizes = []
+
+        def get_paginator(self, name):
+            client = self
+
+            class IncrementalPaginator:
+                def paginate(self, **kwargs):
+                    assert kwargs["PaginationConfig"]["PageSize"] == 1000
+
+                    def objects():
+                        for index in range(object_count):
+                            if index == 1000:
+                                assert client.batch_sizes == [1000]
+                            if index == 2000:
+                                assert client.batch_sizes == [1000, 1000]
+                            yield {
+                                "Key": (
+                                    "T0/win/2026/07/23/10/"
+                                    f"20260723T103000Z_win{index}T0.jpg"
+                                ),
+                                "Size": 1,
+                            }
+
+                    yield {"Contents": objects()}
+
+            return IncrementalPaginator()
+
+        def delete_objects(self, **kwargs):
+            objects = kwargs["Delete"]["Objects"]
+            self.batch_sizes.append(len(objects))
+            return {"Deleted": objects}
+
+    client = RecordingClient()
+    result = cleanup_spool(
+        config=config(),
+        older_than_hours=2,
+        dry_run=False,
+        now=datetime(2026, 7, 24, 12, tzinfo=timezone.utc),
+        client=client,
+        metrics=Metrics(),
+    )
+
+    assert client.batch_sizes == [1000, 1000, 5]
+    assert result.eligible == object_count
+    assert result.deleted == object_count
+
+
+def test_dry_run_diagnostics_must_be_bounded():
+    with pytest.raises(ValueError, match="limit between 1 and 1000"):
+        cleanup_spool(
+            config=config(),
+            older_than_hours=2,
+            dry_run=True,
+            client=Client(),
+            metrics=Metrics(),
+            include_keys=True,
+            limit=1001,
+        )
