@@ -248,6 +248,18 @@ def test_operational_just_recipes_use_container_jobs() -> None:
     assert "ingestion.windy.windy_ingestion_workflow" in justfile
 
 
+def test_production_and_three_day_validation_recipes_use_the_compose_stack() -> None:
+    justfile = (ROOT / "justfile").read_text()
+
+    assert "production-start: container-stack-up" in justfile
+    assert "production-stop: container-stack-stop" in justfile
+    assert "three-day-production-test: production-start" in justfile
+    assert "3 * 24 * 60 * 60" in justfile
+    assert "webcam-three-day-production-test.json" in justfile
+    assert "sleep 259200" not in justfile
+    assert "the stack will remain active until: just production-stop" in justfile
+
+
 def test_checkpoint13_quiet_baseline_has_one_delayed_sequential_workflow() -> None:
     directory = ROOT / "deployment/systemd/checkpoint13-30min-baseline"
     workflow = (directory / "run-workflow").read_text()

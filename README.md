@@ -206,6 +206,25 @@ maintenance or launch host Python workers. Older installations must disable
 superseded discovery or maintenance timers to avoid duplicate executions.
 Normal interactive operation remains `just container-stack-up` and
 `just container-stack-stop`.
+
+The equivalent explicit production commands are:
+
+```bash
+just production-start
+just production-stop
+```
+
+Before production promotion, start the same runtime with a recorded three-day
+observation window:
+
+```bash
+just three-day-production-test
+```
+
+This records the start revision and the exact 72-hour review deadline in
+`/tmp/webcam-three-day-production-test.json`. It does not schedule an automatic
+shutdown: after reviewing three daily runs and approximately 36 cleanup slots,
+run `just production-stop` or leave the validated production stack active.
 The worker health and Prometheus endpoints use internal ports 8002 (Windy),
 8003 (Fintraffic), and 8004 (Skaping). CPU, memory, and graceful-stop limits
 are configurable through the deployment environment; reproducible defaults

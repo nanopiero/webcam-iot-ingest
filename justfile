@@ -137,6 +137,35 @@ container-stack-up:
 container-stack-stop:
     docker compose --env-file .env --profile application --profile monitoring stop
 
+# Build and start the complete production stack, including the permanent
+# maintenance scheduler, then reload mounted monitoring configuration.
+production-start: container-stack-up
+    docker compose --env-file .env --profile monitoring kill -s SIGHUP prometheus alertmanager
+
+# Stop the complete production stack without deleting persistent volumes.
+production-stop: container-stack-stop
+
+# Start the real production runtime and record a three-day validation window.
+# The stack is intentionally not stopped automatically at the deadline: review
+# the results first, then run `just production-stop` or leave production active.
+three-day-production-test: production-start
+    #!/usr/bin/env bash
+    set -euo pipefail
+    state_file="${WEBCAM_THREE_DAY_TEST_STATE_FILE:-/tmp/webcam-three-day-production-test.json}"
+    started_epoch="$(date -u +%s)"
+    deadline_epoch="$((started_epoch + 3 * 24 * 60 * 60))"
+    started_at="$(date -u -d "@${started_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
+    deadline_at="$(date -u -d "@${deadline_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
+    revision="$(git rev-parse HEAD)"
+    umask 077
+    printf '{"deadline_epoch":%s,"deadline_utc":"%s","git_revision":"%s","started_epoch":%s,"started_utc":"%s"}\n' \
+        "$deadline_epoch" "$deadline_at" "$revision" "$started_epoch" "$started_at" \
+        >"$state_file"
+    echo "three-day production validation started: $started_at"
+    echo "review deadline: $deadline_at"
+    echo "state: $state_file"
+    echo "the stack will remain active until: just production-stop"
+
 # Run one selected short-lived maintenance task through the shared runner.
 maintenance task:
     #!/usr/bin/env bash
