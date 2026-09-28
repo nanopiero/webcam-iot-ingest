@@ -27,4 +27,4 @@ dependencies = [
 pythonpath = ["."]
 
 [tool.setuptools.packages.find]
-include = ["api*", "config*", "database*", "discovery*", "ingestion*", "observability*", "storage*"]
+include = ["api*", "config*", "database*", "discovery*", "ingestion*", "maintenance*", "observability*", "storage*"]

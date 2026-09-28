@@ -311,6 +311,72 @@ def test_cleanup_deletes_incrementally_in_bounded_batches():
     assert result.deleted == object_count
 
 
+def test_cleanup_deletes_a_full_batch_before_consuming_the_next_page():
+    events: list[tuple[str, int]] = []
+
+    def old_object(index: int) -> dict[str, object]:
+        return {
+            "Key": (
+                "T0/win/2026/07/23/10/"
+                f"20260723T103000Z_page{index}T0.jpg"
+            ),
+            "Size": 1,
+        }
+
+    class MultiPageClient(Client):
+        def get_paginator(self, name):
+            assert name == "list_objects_v2"
+            client = self
+
+            class MultiPagePaginator:
+                def paginate(self, **kwargs):
+                    assert kwargs["Prefix"] == "T0/"
+                    assert kwargs["PaginationConfig"]["PageSize"] == 1000
+                    events.append(("page", 1))
+                    yield {"Contents": [old_object(index) for index in range(1000)]}
+                    assert client.batch_sizes == [1000]
+                    events.append(("page", 2))
+                    yield {
+                        "Contents": [
+                            old_object(1000),
+                            old_object(1001),
+                        ]
+                    }
+
+            return MultiPagePaginator()
+
+        def __init__(self):
+            self.batch_sizes: list[int] = []
+
+        def delete_objects(self, **kwargs):
+            objects = kwargs["Delete"]["Objects"]
+            self.batch_sizes.append(len(objects))
+            events.append(("delete", len(objects)))
+            return {"Deleted": objects}
+
+    client = MultiPageClient()
+    result = cleanup_spool(
+        config=config(),
+        older_than_hours=2,
+        dry_run=False,
+        now=datetime(2026, 7, 24, 12, tzinfo=timezone.utc),
+        client=client,
+        metrics=Metrics(),
+    )
+
+    assert events == [
+        ("page", 1),
+        ("delete", 1000),
+        ("page", 2),
+        ("delete", 2),
+    ]
+    assert client.batch_sizes == [1000, 2]
+    assert result.examined == 1002
+    assert result.eligible == 1002
+    assert result.deleted == 1002
+    assert result.deleted_bytes == 1002
+
+
 def test_dry_run_diagnostics_must_be_bounded():
     with pytest.raises(ValueError, match="limit between 1 and 1000"):
         cleanup_spool(

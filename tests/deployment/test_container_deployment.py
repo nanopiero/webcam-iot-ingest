@@ -100,6 +100,7 @@ def test_persistent_state_and_short_lived_job_are_declared() -> None:
         "grafana-storage",
         "pushgateway-data",
         "alertmanager-data",
+        "maintenance-state",
     } <= set(config["volumes"])
     job = config["services"]["webcam-job"]
     assert job["depends_on"]["schema-migrate"]["condition"] == (
@@ -112,6 +113,14 @@ def test_persistent_state_and_short_lived_job_are_declared() -> None:
         "http://pushgateway:9091"
     )
     assert job["environment"]["MQTT_HOST"] == "mqtt"
+    assert job["environment"]["WEBCAM_MAINTENANCE_STATE_DIRECTORY"] == (
+        "/var/lib/webcam-maintenance"
+    )
+    assert any(
+        volume["source"] == "maintenance-state"
+        and volume["target"] == "/var/lib/webcam-maintenance"
+        for volume in job["volumes"]
+    )
     assert {secret["source"] for secret in job["secrets"]} >= {
         "database_password",
         "s3_access_key",
@@ -159,31 +168,52 @@ def test_alertmanager_is_configured_for_prometheus_email_routing() -> None:
     assert any("alertmanager" in target["expr"] for target in scrape_health["targets"])
 
 
-def test_systemd_only_orchestrates_compose_and_scheduled_jobs() -> None:
+def test_compose_owns_scheduling_and_systemd_has_no_maintenance_timer() -> None:
     directory = ROOT / "deployment/systemd/pilot"
     stack = (directory / "webcam-stack.service").read_text()
-    maintenance_timer = (directory / "webcam-maintenance.timer").read_text()
-    maintenance = (ROOT / "deployment/maintenance/run").read_text()
-    daily_service = (directory / "webcam-maintenance-sequence.service").read_text()
-    cleanup_service = (directory / "webcam-spool-cleanup.service").read_text()
+    wrapper = (ROOT / "deployment/maintenance/run").read_text()
+    maintenance = (ROOT / "maintenance/runner.py").read_text()
+    scheduler = (ROOT / "maintenance/scheduler.py").read_text()
+    config = _compose_config()
+    services = config["services"]
 
     assert "--profile application --profile monitoring up -d" in stack
     assert "python -m ingestion" not in stack
-    assert "OnCalendar=*-*-* 00:00:00 UTC" in maintenance_timer
+    assert not list(directory.glob("*maintenance*.timer"))
+    assert not list(directory.glob("*spool-cleanup*.timer"))
+    assert [name for name in services if "scheduler" in name] == [
+        "maintenance-scheduler"
+    ]
+    scheduler_service = services["maintenance-scheduler"]
+    assert scheduler_service["command"] == [
+        "python",
+        "-m",
+        "maintenance.scheduler",
+    ]
+    assert scheduler_service["restart"] == "unless-stopped"
+    assert scheduler_service["stop_grace_period"] == "40s"
+    assert scheduler_service.get("depends_on", {}) == {}
+    assert scheduler_service["environment"]["WEBCAM_SPOOL_RETENTION_HOURS"] == "2"
+    assert any(
+        volume["source"] == "maintenance-state"
+        and volume["target"] == "/var/lib/webcam-maintenance"
+        for volume in scheduler_service["volumes"]
+    )
+    assert all("docker.sock" not in volume["source"] for volume in scheduler_service["volumes"])
     expected = [
-        "run-discovery windy",
-        "run-discovery fintraffic",
-        "run-discovery skaping",
+        "discovery.windy.windy_discovery_workflow",
+        "discovery.fintraffic.fintraffic_discovery_workflow",
+        "discovery.skaping.skaping_discovery_workflow",
         "database.database_backup",
     ]
     positions = [maintenance.index(value) for value in expected]
     assert positions == sorted(positions)
-    assert "flock -n" in maintenance
-    assert "daily|cleanup" in maintenance
-    assert "deployment/maintenance/run daily" in daily_service
-    assert "deployment/maintenance/run cleanup" in cleanup_service
-    assert "webcam-stack.service" not in daily_service
-    assert "webcam-stack.service" not in cleanup_service
+    assert "acquire_task_lock" in maintenance
+    assert "SUPPORTED_TASKS" in maintenance
+    assert "python -m maintenance.runner" in wrapper
+    assert "discovery.windy" not in wrapper
+    assert '"-m", "maintenance.runner", task' in scheduler
+    assert "discovery.windy" not in scheduler
 
 
 def test_operational_just_recipes_use_container_jobs() -> None:

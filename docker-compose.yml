@@ -1,5 +1,50 @@
 name: iot-webcam-ingest
 
+x-maintenance-runtime: &maintenance-runtime
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - .env
+  environment:
+    DATABASE_HOST: postgres
+    DATABASE_PORT: 5432
+    DATABASE_NAME: ${DATABASE_NAME:-webcam_ingestion}
+    DATABASE_USER: ${DATABASE_USER:-webcam_ingestion}
+    DATABASE_PASSWORD_FILE: /run/secrets/database_password
+    WINDY_API_KEY_FILE: /run/secrets/windy_api_key
+    SKAPING_API_KEY_FILE: /run/secrets/skaping_api_key
+    FINTRAFFIC_USER_HEADER: ${FINTRAFFIC_USER_HEADER:-webcam-iot-ingest}
+    MQTT_HOST: mqtt
+    MQTT_PORT: 1883
+    MQTT_TLS: "false"
+    MQTT_TOPIC_PREFIX: ${MQTT_TOPIC_PREFIX:-webcam}
+    S3_ENDPOINT_URL: ${S3_ENDPOINT_URL}
+    S3_BUCKET: ${S3_BUCKET}
+    S3_PREFIX: ${S3_PREFIX:-}
+    S3_PUBLIC_URL_BASE: ${S3_PUBLIC_URL_BASE}
+    S3_REGION: ${S3_REGION:-}
+    S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
+    S3_ACCESS_KEY_FILE: /run/secrets/s3_access_key
+    S3_SECRET_KEY_FILE: /run/secrets/s3_secret_key
+    DISCOVERY_METRICS_GATEWAY_URL: http://pushgateway:9091
+    MAINTENANCE_METRICS_GATEWAY_URL: http://pushgateway:9091
+    ALERTMANAGER_URL: http://alertmanager:9093
+    WEBCAM_MAINTENANCE_STATE_DIRECTORY: /var/lib/webcam-maintenance
+  volumes:
+    - maintenance-state:/var/lib/webcam-maintenance
+  secrets:
+    - database_password
+    - windy_api_key
+    - skaping_api_key
+    - s3_access_key
+    - s3_secret_key
+  depends_on:
+    schema-migrate:
+      condition: service_completed_successfully
+    mqtt:
+      condition: service_healthy
+
 services:
   postgres:
     image: postgres:16.9-bookworm
@@ -269,49 +314,20 @@ services:
       start_period: 30s
 
   webcam-job:
+    <<: *maintenance-runtime
     profiles: ["jobs"]
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file:
-      - .env
     cpus: ${WEBCAM_JOB_CPU_LIMIT:-0.5}
     mem_limit: ${WEBCAM_JOB_MEMORY_LIMIT:-1g}
-    environment:
-      DATABASE_HOST: postgres
-      DATABASE_PORT: 5432
-      DATABASE_NAME: ${DATABASE_NAME:-webcam_ingestion}
-      DATABASE_USER: ${DATABASE_USER:-webcam_ingestion}
-      DATABASE_PASSWORD_FILE: /run/secrets/database_password
-      WINDY_API_KEY_FILE: /run/secrets/windy_api_key
-      SKAPING_API_KEY_FILE: /run/secrets/skaping_api_key
-      FINTRAFFIC_USER_HEADER: ${FINTRAFFIC_USER_HEADER:-webcam-iot-ingest}
-      MQTT_HOST: mqtt
-      MQTT_PORT: 1883
-      MQTT_TLS: "false"
-      MQTT_TOPIC_PREFIX: ${MQTT_TOPIC_PREFIX:-webcam}
-      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL}
-      S3_BUCKET: ${S3_BUCKET}
-      S3_PREFIX: ${S3_PREFIX:-}
-      S3_PUBLIC_URL_BASE: ${S3_PUBLIC_URL_BASE}
-      S3_REGION: ${S3_REGION:-}
-      S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
-      S3_ACCESS_KEY_FILE: /run/secrets/s3_access_key
-      S3_SECRET_KEY_FILE: /run/secrets/s3_secret_key
-      DISCOVERY_METRICS_GATEWAY_URL: http://pushgateway:9091
-      MAINTENANCE_METRICS_GATEWAY_URL: http://pushgateway:9091
-      ALERTMANAGER_URL: http://alertmanager:9093
-    secrets:
-      - database_password
-      - windy_api_key
-      - skaping_api_key
-      - s3_access_key
-      - s3_secret_key
-    depends_on:
-      schema-migrate:
-        condition: service_completed_successfully
-      mqtt:
-        condition: service_healthy
+
+  maintenance-scheduler:
+    <<: *maintenance-runtime
+    profiles: ["application"]
+    command: ["python", "-m", "maintenance.scheduler"]
+    restart: unless-stopped
+    stop_grace_period: 40s
+    cpus: ${MAINTENANCE_SCHEDULER_CPU_LIMIT:-1.0}
+    mem_limit: ${MAINTENANCE_SCHEDULER_MEMORY_LIMIT:-1g}
+    depends_on: {}
 
   mqtt:
     image: eclipse-mosquitto:2.0.21
@@ -460,6 +476,7 @@ volumes:
   prometheus-data:
   pushgateway-data:
   alertmanager-data:
+  maintenance-state:
 
 secrets:
   database_password:
