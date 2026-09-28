@@ -253,7 +253,8 @@ def test_production_and_three_day_validation_recipes_use_the_compose_stack() -> 
 
     assert "production-start:" in justfile
     assert "production-stop:" in justfile
-    assert "three-day-production-test: production-start" in justfile
+    assert "three-day-production-test:" in justfile
+    assert "three-day-production-test: production-start" not in justfile
     assert "container-stack-up:" not in justfile
     assert "container-stack-stop:" not in justfile
     assert "checkpoint12-discover" not in justfile
@@ -269,6 +270,16 @@ def test_production_and_three_day_validation_recipes_use_the_compose_stack() -> 
     ) in justfile
     assert "3 * 24 * 60 * 60" in justfile
     assert "webcam-three-day-production-test.json" in justfile
+    assert "var/validation" in justfile
+    assert "git diff --quiet" in justfile
+    assert "git diff --cached --quiet" in justfile
+    assert "git ls-files --others --exclude-standard" in justfile
+    assert "another three-day validation command is already running" in justfile
+    assert "a three-day validation is already active until" in justfile
+    assert "archived completed validation state" in justfile
+    assert justfile.index("assert_clean_deployment_source") < justfile.index(
+        "just production-start"
+    )
     assert "sleep 259200" not in justfile
     assert "the stack will remain active until: just production-stop" in justfile
 def test_quiet_maintenance_uses_production_order_and_optional_summary() -> None:

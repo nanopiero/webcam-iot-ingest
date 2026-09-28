@@ -139,22 +139,77 @@ production-start:
 production-stop:
     docker compose --env-file .env --profile application --profile monitoring stop
 
-# Start the real production runtime and record a three-day validation window.
-# The stack is intentionally not stopped automatically at the deadline: review
-# the results first, then run `just production-stop` or leave production active.
-three-day-production-test: production-start
+# Start the real production runtime from a clean source tree and record a
+# persistent three-day validation window. The stack is intentionally not
+# stopped automatically at the deadline.
+three-day-production-test:
     #!/usr/bin/env bash
     set -euo pipefail
-    state_file="${WEBCAM_THREE_DAY_TEST_STATE_FILE:-/tmp/webcam-three-day-production-test.json}"
+    state_file="${WEBCAM_THREE_DAY_TEST_STATE_FILE:-$PWD/var/validation/webcam-three-day-production-test.json}"
+    state_directory="$(dirname "$state_file")"
+    mkdir -p "$state_directory"
+    exec 9>"${state_file}.lock"
+    if ! flock -n 9; then
+        echo "another three-day validation command is already running" >&2
+        exit 1
+    fi
+
+    assert_clean_deployment_source() {
+        if ! git diff --quiet -- || ! git diff --cached --quiet --; then
+            echo "refusing production validation: tracked files contain uncommitted changes" >&2
+            exit 1
+        fi
+        local untracked
+        untracked="$(git ls-files --others --exclude-standard -- \
+            Dockerfile docker-compose.yml pyproject.toml README.md \
+            api config database discovery ingestion maintenance observability storage \
+            alertmanager grafana mosquitto prometheus \
+            ':(glob)docker-compose*.yml')"
+        if [[ -n "$untracked" ]]; then
+            echo "refusing production validation: untracked deployment inputs exist:" >&2
+            printf '%s\n' "$untracked" >&2
+            exit 1
+        fi
+    }
+
+    now_epoch="$(date -u +%s)"
+    if [[ -e "$state_file" ]]; then
+        existing_deadline="$(sed -n 's/.*"deadline_epoch":\([0-9][0-9]*\).*/\1/p' "$state_file")"
+        if [[ ! "$existing_deadline" =~ ^[0-9]+$ ]]; then
+            echo "refusing to replace unreadable validation state: $state_file" >&2
+            exit 1
+        fi
+        if ((existing_deadline > now_epoch)); then
+            echo "a three-day validation is already active until $(date -u -d "@${existing_deadline}" +%Y-%m-%dT%H:%M:%SZ)" >&2
+            echo "state: $state_file" >&2
+            exit 1
+        fi
+        archive="${state_file%.json}.completed-${now_epoch}.json"
+        mv "$state_file" "$archive"
+        echo "archived completed validation state: $archive"
+    fi
+
+    assert_clean_deployment_source
+    revision="$(git rev-parse HEAD)"
+    just production-start
+    assert_clean_deployment_source
+    if [[ "$(git rev-parse HEAD)" != "$revision" ]]; then
+        echo "repository revision changed while the production stack was built" >&2
+        exit 1
+    fi
+
     started_epoch="$(date -u +%s)"
     deadline_epoch="$((started_epoch + 3 * 24 * 60 * 60))"
     started_at="$(date -u -d "@${started_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
     deadline_at="$(date -u -d "@${deadline_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
-    revision="$(git rev-parse HEAD)"
     umask 077
+    temporary_state="$(mktemp "${state_file}.tmp.XXXXXX")"
+    trap 'rm -f "$temporary_state"' EXIT
     printf '{"deadline_epoch":%s,"deadline_utc":"%s","git_revision":"%s","started_epoch":%s,"started_utc":"%s"}\n' \
         "$deadline_epoch" "$deadline_at" "$revision" "$started_epoch" "$started_at" \
-        >"$state_file"
+        >"$temporary_state"
+    mv "$temporary_state" "$state_file"
+    trap - EXIT
     echo "three-day production validation started: $started_at"
     echo "review deadline: $deadline_at"
     echo "state: $state_file"
@@ -665,7 +720,8 @@ two-hour-full-alert-test:
     just ingestion-test-three-networks 2h 1 true
 
 # Checkpoint-13 recovery drill: full workers, Windy crash, PostgreSQL restart,
-# then the cleanup-first production maintenance sequence. Runs in screen.
+# then its historical combined cleanup/discovery/backup workflow. This does not
+# reproduce the independent production schedules. Runs in screen.
 checkpoint13-unquiet-test duration="90m":
     #!/usr/bin/env bash
     set -euo pipefail

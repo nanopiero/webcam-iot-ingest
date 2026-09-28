@@ -212,10 +212,14 @@ observation window:
 just three-day-production-test
 ```
 
-This records the start revision and the exact 72-hour review deadline in
-`/tmp/webcam-three-day-production-test.json`. It does not schedule an automatic
-shutdown: after reviewing three daily runs and approximately 36 cleanup slots,
-run `just production-stop` or leave the validated production stack active.
+The command refuses tracked changes or untracked deployment inputs, starts the
+stack, and records the exact Git revision and 72-hour review deadline in
+`var/validation/webcam-three-day-production-test.json`. The ignored `var/`
+directory survives a normal VM restart. Re-running the command while that
+record is active is rejected; an expired record is archived before a new
+window starts. It does not schedule an automatic shutdown: after reviewing
+three daily runs and approximately 36 cleanup slots, run `just production-stop`
+or leave the validated production stack active.
 The worker health and Prometheus endpoints use internal ports 8002 (Windy),
 8003 (Fintraffic), and 8004 (Skaping). CPU, memory, and graceful-stop limits
 are configurable through the deployment environment; reproducible defaults
@@ -600,16 +604,18 @@ Cleanup email is failure-only: success clears its Prometheus alert state
 without sending either a success or resolved email. Other alerts retain their
 configured resolved notifications.
 
-During pilot validation only, each successful production maintenance sequence
-also raises a short-lived informational email alert. This temporary success
-notification is intentionally separate from the permanent failure alerts and
-can be removed after scheduled maintenance has been established operationally.
+During pilot validation only, each successful daily discovery/database-backup
+task also raises a short-lived informational email alert. This temporary
+success notification is intentionally separate from the permanent failure
+alerts and can be removed after scheduled maintenance has been established
+operationally.
 
 The checkpoint-13 unquiet recovery exercise starts the full three-network
-stack, crashes only the Windy worker process after 15 minutes, restarts PostgreSQL
-after 30 minutes, and starts cleanup-first maintenance after 45 minutes. It
-stops ingestion after the requested duration but lets active maintenance
-finish:
+stack, crashes only the Windy worker process after 15 minutes, restarts
+PostgreSQL after 30 minutes, and starts its historical combined
+cleanup/discovery/backup workflow after 45 minutes. It does not reproduce the
+independent production schedules. It stops ingestion after the requested
+duration but lets active maintenance finish:
 
 ```bash
 just checkpoint13-unquiet-test 90m
