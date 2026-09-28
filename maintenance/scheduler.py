@@ -14,6 +14,10 @@ import tempfile
 import time
 from typing import Callable, Mapping, Protocol, Sequence
 
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+from config.deployment_config import MaintenanceMetricsConfig
+
 
 TASK_DAILY = "daily"
 TASK_CLEANUP = "cleanup"
@@ -62,6 +66,15 @@ def previous_schedule_slot(task: str, slot: datetime) -> datetime:
         return slot - timedelta(days=1)
     if task == TASK_CLEANUP:
         return slot - timedelta(hours=2)
+    raise ValueError("unsupported maintenance task")
+
+
+def next_schedule_slot(task: str, now: datetime) -> datetime:
+    latest = latest_schedule_slot(task, now)
+    if task == TASK_DAILY:
+        return latest + timedelta(days=1)
+    if task == TASK_CLEANUP:
+        return latest + timedelta(hours=2)
     raise ValueError("unsupported maintenance task")
 
 
@@ -197,6 +210,159 @@ class RunningTask:
     slot: str
 
 
+class SchedulerMetrics:
+    def __init__(
+        self,
+        config: MaintenanceMetricsConfig,
+        *,
+        interval_s: float = 60,
+    ) -> None:
+        if interval_s <= 0:
+            raise ValueError("scheduler metrics interval must be positive")
+        self.config = config
+        self.interval_s = interval_s
+        self.last_published_monotonic: float | None = None
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str]) -> "SchedulerMetrics":
+        try:
+            interval = float(
+                environment.get(
+                    "WEBCAM_MAINTENANCE_SCHEDULER_METRICS_INTERVAL_S", "60"
+                )
+            )
+        except ValueError as error:
+            raise ValueError(
+                "WEBCAM_MAINTENANCE_SCHEDULER_METRICS_INTERVAL_S must be positive"
+            ) from error
+        enabled_value = environment.get(
+            "MAINTENANCE_METRICS_ENABLED",
+            environment.get("BATCH_METRICS_ENABLED", "true"),
+        ).lower()
+        if enabled_value not in {"true", "false"}:
+            raise ValueError("MAINTENANCE_METRICS_ENABLED must be true or false")
+        gateway = environment.get(
+            "MAINTENANCE_METRICS_GATEWAY_URL",
+            environment.get(
+                "BATCH_METRICS_GATEWAY_URL",
+                environment.get(
+                    "DISCOVERY_METRICS_GATEWAY_URL", "http://localhost:9091"
+                ),
+            ),
+        ).rstrip("/")
+        timeout = float(
+            environment.get(
+                "MAINTENANCE_METRICS_PUSH_TIMEOUT_S",
+                environment.get("BATCH_METRICS_PUSH_TIMEOUT_S", "5"),
+            )
+        )
+        if not gateway.startswith(("http://", "https://")):
+            raise ValueError("maintenance metrics gateway URL must use HTTP or HTTPS")
+        if timeout <= 0:
+            raise ValueError("maintenance metrics push timeout must be positive")
+        return cls(
+            MaintenanceMetricsConfig(
+                enabled=enabled_value == "true",
+                gateway_url=gateway,
+                push_timeout_s=timeout,
+            ),
+            interval_s=interval,
+        )
+
+    def publish(
+        self,
+        scheduler: "MaintenanceScheduler",
+        now: datetime,
+        *,
+        force: bool = False,
+    ) -> bool:
+        monotonic_now = time.monotonic()
+        if (
+            not force
+            and self.last_published_monotonic is not None
+            and monotonic_now - self.last_published_monotonic < self.interval_s
+        ):
+            return False
+        if not self.config.enabled:
+            self.last_published_monotonic = monotonic_now
+            return False
+        registry = CollectorRegistry()
+        heartbeat = Gauge(
+            "webcam_maintenance_scheduler_heartbeat_unixtime",
+            "Unix timestamp of the latest scheduler heartbeat",
+            registry=registry,
+        )
+        next_slot = Gauge(
+            "webcam_maintenance_scheduler_next_slot_unixtime",
+            "Unix timestamp of the next scheduled task slot",
+            ["task"],
+            registry=registry,
+        )
+        last_started = Gauge(
+            "webcam_maintenance_scheduler_last_started_slot_unixtime",
+            "Unix timestamp of the latest started scheduled slot",
+            ["task"],
+            registry=registry,
+        )
+        last_completed = Gauge(
+            "webcam_maintenance_scheduler_last_completed_slot_unixtime",
+            "Unix timestamp of the latest completed scheduled slot",
+            ["task"],
+            registry=registry,
+        )
+        task_running = Gauge(
+            "webcam_maintenance_scheduler_task_running",
+            "Whether a scheduled maintenance task is currently running",
+            ["task"],
+            registry=registry,
+        )
+        slot_pending = Gauge(
+            "webcam_maintenance_scheduler_slot_pending",
+            "Whether the latest due slot has not completed yet",
+            ["task"],
+            registry=registry,
+        )
+        last_result = Gauge(
+            "webcam_maintenance_scheduler_last_result",
+            "Latest scheduler result state for each maintenance task",
+            ["task", "result"],
+            registry=registry,
+        )
+        heartbeat.set(now.astimezone(timezone.utc).timestamp())
+        for task in TASKS:
+            task_state = scheduler._task_state(task)
+            started = _parse_slot(task_state["last_started_slot"])
+            completed = _parse_slot(task_state["last_completed_slot"])
+            due = latest_schedule_slot(task, now)
+            next_slot.labels(task).set(next_schedule_slot(task, now).timestamp())
+            last_started.labels(task).set(started.timestamp())
+            last_completed.labels(task).set(completed.timestamp())
+            task_running.labels(task).set(1 if task in scheduler.running else 0)
+            slot_pending.labels(task).set(1 if completed < due else 0)
+            last_result.labels(task, str(task_state["last_result"])).set(1)
+        try:
+            push_to_gateway(
+                self.config.gateway_url,
+                job="webcam_maintenance_scheduler",
+                registry=registry,
+                timeout=self.config.push_timeout_s,
+            )
+        except Exception as error:
+            self.last_published_monotonic = monotonic_now
+            _emit(
+                {
+                    "maintenance_scheduler_metrics": {
+                        "error": type(error).__name__,
+                        "outcome": "publish_error",
+                    }
+                },
+                error=True,
+            )
+            return False
+        self.last_published_monotonic = monotonic_now
+        return True
+
+
 class MaintenanceScheduler:
     """Launch due tasks without blocking scheduling of the other task."""
 
@@ -212,15 +378,17 @@ class MaintenanceScheduler:
         self.running: dict[str, RunningTask] = {}
         self.reported_overlaps: dict[str, str] = {}
 
-    def _ensure_state(self, now: datetime) -> None:
+    def _ensure_state(self, now: datetime) -> bool:
         if self.state is not None:
-            return
+            return False
         state = self.state_store.load()
+        initialized = state is None
         if state is None:
             state = _initial_state(now)
             self.state_store.save(state)
             _emit({"maintenance_scheduler": {"event": "state_initialized"}})
         self.state = _validate_state(state)
+        return initialized
 
     def _task_state(self, task: str) -> dict[str, object]:
         assert self.state is not None
@@ -234,16 +402,23 @@ class MaintenanceScheduler:
         assert self.state is not None
         self.state_store.save(self.state)
 
-    def _reap(self) -> None:
+    def _reap(self) -> bool:
+        changed = False
         for task, running in tuple(self.running.items()):
             returncode = running.process.poll()
             if returncode is None:
                 continue
+            if returncode == 0:
+                result = "success"
+            elif returncode == 75:
+                result = "already_running"
+            else:
+                result = "failure"
             _emit(
                 {
                     "maintenance_scheduler": {
                         "event": "task_completed",
-                        "result": "success" if returncode == 0 else "failure",
+                        "result": result,
                         "returncode": returncode,
                         "slot": running.slot,
                         "task": task,
@@ -252,16 +427,16 @@ class MaintenanceScheduler:
             )
             task_state = self._task_state(task)
             task_state["last_completed_slot"] = running.slot
-            task_state["last_result"] = (
-                "success" if returncode == 0 else "failure"
-            )
+            task_state["last_result"] = result
             self._save()
             del self.running[task]
             self.reported_overlaps.pop(task, None)
+            changed = True
+        return changed
 
-    def tick(self, now: datetime) -> None:
-        self._ensure_state(now)
-        self._reap()
+    def tick(self, now: datetime) -> bool:
+        changed = self._ensure_state(now)
+        changed = self._reap() or changed
         due_now = set(scheduled_tasks(now))
         for task in TASKS:
             due_slot = latest_schedule_slot(task, now)
@@ -294,6 +469,7 @@ class MaintenanceScheduler:
                 task_state["last_completed_slot"] = slot
                 task_state["last_result"] = "launch_failure"
                 self._save()
+                changed = True
                 _emit(
                     {
                         "maintenance_scheduler": {
@@ -307,6 +483,7 @@ class MaintenanceScheduler:
                 )
                 continue
             self.running[task] = RunningTask(process=process, slot=slot)
+            changed = True
             _emit(
                 {
                     "maintenance_scheduler": {
@@ -318,6 +495,7 @@ class MaintenanceScheduler:
                     }
                 }
             )
+        return changed
 
     def shutdown(self, timeout_s: float = 30) -> None:
         for running in self.running.values():
@@ -366,6 +544,7 @@ def run_scheduler(
     scheduler = MaintenanceScheduler(
         state_store=FileStateStore.from_environment(environment)
     )
+    metrics = SchedulerMetrics.from_environment(environment)
     stopping = False
 
     def stop(_signum, _frame) -> None:
@@ -377,10 +556,14 @@ def run_scheduler(
     _emit({"maintenance_scheduler": {"event": "started"}})
     try:
         while not stopping:
-            scheduler.tick(now())
+            current = now()
+            changed = scheduler.tick(current)
+            metrics.publish(scheduler, current, force=changed)
             sleep(poll_interval)
     finally:
         scheduler.shutdown()
+        if scheduler.state is not None:
+            metrics.publish(scheduler, now(), force=True)
         _emit({"maintenance_scheduler": {"event": "stopped"}})
 
 

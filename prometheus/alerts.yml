@@ -48,13 +48,37 @@ groups:
           summary: "Discovery failed for {{ $labels.source_network }}"
       - alert: WebcamCleanupFailed
         expr: |
-          increase(webcam_maintenance_run_total{maintenance_job="spool_cleanup",result="failure"}[15m]) > 0
-          or
-          increase(webcam_batch_run_total{batch_job="spool_cleanup",result="failure"}[15m]) > 0
+          max(
+            (webcam_maintenance_last_run_unixtime{maintenance_job="spool_cleanup",result="failure"} > 0)
+            or
+            (webcam_maintenance_task_last_run_unixtime{task="cleanup",result="failure"} > 0)
+            or
+            (webcam_maintenance_scheduler_last_result{task="cleanup",result=~"failure|launch_failure"} == 1)
+          ) > 0
         labels:
           severity: warning
         annotations:
           summary: "The S3 spool cleanup job failed"
+      - alert: WebcamMaintenanceSchedulerDown
+        expr: |
+          absent(webcam_maintenance_scheduler_heartbeat_unixtime)
+          or
+          time() - webcam_maintenance_scheduler_heartbeat_unixtime > 180
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The Compose maintenance scheduler heartbeat is missing"
+      - alert: WebcamMaintenanceScheduleMissed
+        expr: |
+          webcam_maintenance_scheduler_slot_pending == 1
+          and on(task)
+          webcam_maintenance_scheduler_task_running == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Maintenance task {{ $labels.task }} has a due slot that is not running"
       - alert: WebcamDatabaseBackupFailed
         expr: |
           increase(webcam_maintenance_run_total{maintenance_job="database_backup",result="failure"}[15m]) > 0
@@ -78,7 +102,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "The latest cleanup-first maintenance sequence failed"
+          summary: "The latest daily discovery and database-backup sequence failed"
       # Temporary pilot notification: remove after maintenance success has
       # been operationally established. The expression naturally resolves
       # after 15 minutes, before the four-hour repeat interval.
@@ -87,4 +111,4 @@ groups:
         labels:
           severity: info
         annotations:
-          summary: "The cleanup-first maintenance sequence succeeded"
+          summary: "The daily discovery and database-backup sequence succeeded"

@@ -175,7 +175,7 @@ def publish_metrics(
             request.Request(
                 gateway_url.rstrip("/") + path,
                 data=payload,
-                method="POST",
+                method="PUT",
             ),
             timeout=5,
         ).close()
@@ -209,7 +209,7 @@ def _publish_legacy_daily_result(
                 gateway_url.rstrip("/")
                 + "/metrics/job/webcam_maintenance_sequence",
                 data=payload,
-                method="POST",
+                method="PUT",
             ),
             timeout=5,
         ).close()

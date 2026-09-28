@@ -1,10 +1,14 @@
 from datetime import datetime, timezone
+from unittest.mock import Mock
 
 import pytest
+from prometheus_client import generate_latest
 
+from config.deployment_config import MaintenanceMetricsConfig
 from maintenance.scheduler import (
     FileStateStore,
     MaintenanceScheduler,
+    SchedulerMetrics,
     schedule_slot,
     scheduled_tasks,
 )
@@ -259,3 +263,62 @@ def test_file_state_is_atomic_and_contains_no_temporary_files(tmp_path) -> None:
 
     assert state.load() is not None
     assert list(state_path.parent.iterdir()) == [state_path]
+
+
+def test_scheduler_metrics_expose_heartbeat_slots_and_task_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    push = Mock()
+    monkeypatch.setattr("maintenance.scheduler.push_to_gateway", push)
+    scheduler = MaintenanceScheduler()
+    now = utc(10, 30)
+    scheduler.tick(now)
+    metrics = SchedulerMetrics(
+        MaintenanceMetricsConfig(True, "http://pushgateway:9091", 5)
+    )
+
+    assert metrics.publish(scheduler, now, force=True)
+
+    assert push.call_args.kwargs["job"] == "webcam_maintenance_scheduler"
+    payload = generate_latest(push.call_args.kwargs["registry"])
+    assert b"webcam_maintenance_scheduler_heartbeat_unixtime" in payload
+    assert b'webcam_maintenance_scheduler_next_slot_unixtime{task="daily"}' in payload
+    assert b'webcam_maintenance_scheduler_next_slot_unixtime{task="cleanup"}' in payload
+    assert b'webcam_maintenance_scheduler_task_running{task="daily"} 0.0' in payload
+    assert b'webcam_maintenance_scheduler_slot_pending{task="cleanup"} 0.0' in payload
+    assert (
+        b'webcam_maintenance_scheduler_last_result{result="initialized",task="daily"}'
+        in payload
+    )
+
+
+def test_scheduler_metrics_use_passed_environment() -> None:
+    metrics = SchedulerMetrics.from_environment(
+        {
+            "MAINTENANCE_METRICS_ENABLED": "false",
+            "MAINTENANCE_METRICS_GATEWAY_URL": "https://metrics.example",
+            "MAINTENANCE_METRICS_PUSH_TIMEOUT_S": "7",
+            "WEBCAM_MAINTENANCE_SCHEDULER_METRICS_INTERVAL_S": "45",
+        }
+    )
+
+    assert metrics.config.enabled is False
+    assert metrics.config.gateway_url == "https://metrics.example"
+    assert metrics.config.push_timeout_s == 7
+    assert metrics.interval_s == 45
+
+
+def test_already_running_exit_is_not_recorded_as_task_failure() -> None:
+    processes: list[Process] = []
+
+    def factory(command):
+        process = Process(command)
+        processes.append(process)
+        return process
+
+    scheduler = MaintenanceScheduler(process_factory=factory)
+    scheduler.tick(utc(1, 0, 1))
+    processes[0].returncode = 75
+    scheduler.tick(utc(1, 1))
+
+    assert scheduler._task_state("cleanup")["last_result"] == "already_running"

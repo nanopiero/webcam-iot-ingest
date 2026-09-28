@@ -24,6 +24,7 @@ class MaintenanceJobMetrics:
         self.config = config
         self.events = CollectorRegistry()
         self.state = CollectorRegistry()
+        self.outcome_state = CollectorRegistry()
         self.runs = Counter(
             "webcam_maintenance_run_total",
             "Completed maintenance runs",
@@ -64,6 +65,12 @@ class MaintenanceJobMetrics:
             "webcam_maintenance_last_duration_seconds",
             "Duration of the latest successful maintenance job",
             registry=self.state,
+        )
+        self.last_run = Gauge(
+            "webcam_maintenance_last_run_unixtime",
+            "Unix timestamp and result of the latest maintenance-job run",
+            ["result"],
+            registry=self.outcome_state,
         )
         self.retention_hours = (
             Gauge(
@@ -109,6 +116,8 @@ class MaintenanceJobMetrics:
             self.bytes.labels(outcome).inc(max(0, value))
         for stage, value in stages.items():
             self.stage_duration.labels(stage).observe(max(0.0, value))
+        if not dry_run:
+            self.last_run.labels(result).set(time.time())
         if success and not dry_run:
             self.last_success.set(time.time())
             self.last_duration.set(max(0.0, duration_s))
@@ -116,9 +125,12 @@ class MaintenanceJobMetrics:
                 self.retention_hours.set(retention_hours)
             if backup_size_bytes is not None and self.last_size is not None:
                 self.last_size.set(max(0, backup_size_bytes))
-        return self._push(include_state=success and not dry_run)
+        return self._push(
+            include_state=success and not dry_run,
+            include_outcome=not dry_run,
+        )
 
-    def _push(self, *, include_state: bool) -> bool:
+    def _push(self, *, include_state: bool, include_outcome: bool) -> bool:
         if not self.config.enabled:
             return False
         grouping = {"maintenance_job": self.job_name}
@@ -135,6 +147,14 @@ class MaintenanceJobMetrics:
                     self.config.gateway_url,
                     job="webcam_maintenance_state",
                     registry=self.state,
+                    grouping_key=grouping,
+                    timeout=self.config.push_timeout_s,
+                )
+            if include_outcome:
+                push_to_gateway(
+                    self.config.gateway_url,
+                    job="webcam_maintenance_outcome",
+                    registry=self.outcome_state,
                     grouping_key=grouping,
                     timeout=self.config.push_timeout_s,
                 )

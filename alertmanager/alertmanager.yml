@@ -14,9 +14,17 @@ route:
   group_wait: 30s
   group_interval: 5m
   repeat_interval: 4h
+  routes:
+    - receiver: cleanup-failure-email
+      matchers:
+        - alertname="WebcamCleanupFailed"
 
 receivers:
   - name: pilot-email
     email_configs:
       - to: pierre.lepetit@gmail.com
         send_resolved: true
+  - name: cleanup-failure-email
+    email_configs:
+      - to: pierre.lepetit@gmail.com
+        send_resolved: false

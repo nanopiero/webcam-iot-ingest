@@ -1,6 +1,6 @@
 {
   "annotations": {"list": []},
-  "description": "Persistent Pushgateway metrics for cleanup, PostgreSQL backup, backup retention, explicit restore, and maintenance sequencing.",
+  "description": "Persistent Pushgateway metrics for the Compose scheduler, cleanup, PostgreSQL backup, backup retention, explicit restore, and maintenance sequencing.",
   "editable": true,
   "graphTooltip": 1,
   "panels": [
@@ -126,6 +126,36 @@
         {"expr": "webcam_batch_last_duration_seconds{batch_job=\"database_restore\"}", "legendFormat": "legacy · latest successful restore"}
       ],
       "title": "Maintenance and recovery duration",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Scheduler heartbeat plus the latest completed and next planned UTC slots.",
+      "fieldConfig": {"defaults": {"unit": "dateTimeFromNow"}, "overrides": []},
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 26},
+      "id": 10,
+      "options": {"colorMode": "value", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [
+        {"expr": "webcam_maintenance_scheduler_heartbeat_unixtime * 1000", "legendFormat": "scheduler heartbeat"},
+        {"expr": "webcam_maintenance_scheduler_last_completed_slot_unixtime * 1000", "legendFormat": "{{task}} · completed"},
+        {"expr": "webcam_maintenance_scheduler_next_slot_unixtime * 1000", "legendFormat": "{{task}} · next"}
+      ],
+      "title": "Scheduler timing",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Running and pending flags plus the latest persisted scheduler result.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 26},
+      "id": 11,
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [
+        {"expr": "webcam_maintenance_scheduler_task_running", "legendFormat": "{{task}} · running"},
+        {"expr": "webcam_maintenance_scheduler_slot_pending", "legendFormat": "{{task}} · pending"},
+        {"expr": "webcam_maintenance_scheduler_last_result", "legendFormat": "{{task}} · {{result}}"}
+      ],
+      "title": "Scheduler task state",
       "type": "stat"
     }
   ],

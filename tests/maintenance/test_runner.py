@@ -5,8 +5,10 @@ import pytest
 
 from maintenance.runner import (
     MaintenanceAlreadyRunning,
+    _publish_legacy_daily_result,
     acquire_task_lock,
     maintenance_steps,
+    publish_metrics,
     run_task,
     task_lock_path,
 )
@@ -131,3 +133,37 @@ def test_cleanup_rejects_invalid_retention(tmp_path: Path, value: str) -> None:
 def test_unknown_task_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="daily or cleanup"):
         maintenance_steps("unknown", _environment(tmp_path))
+
+
+def test_task_state_metrics_replace_previous_pushgateway_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    methods: list[str] = []
+
+    class Response:
+        def close(self):
+            pass
+
+    def open_request(value, *, timeout):
+        assert timeout == 5
+        methods.append(value.get_method())
+        return Response()
+
+    monkeypatch.setattr("maintenance.runner.request.urlopen", open_request)
+
+    publish_metrics(
+        "http://pushgateway:9091",
+        task="cleanup",
+        step=None,
+        result="failure",
+        duration_s=1,
+        timestamp=1,
+    )
+    _publish_legacy_daily_result(
+        "http://pushgateway:9091",
+        result="success",
+        duration_s=2,
+        timestamp=2,
+    )
+
+    assert methods == ["PUT", "PUT"]

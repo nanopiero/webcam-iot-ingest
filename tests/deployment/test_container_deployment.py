@@ -155,9 +155,18 @@ def test_alertmanager_is_configured_for_prometheus_email_routing() -> None:
     assert "alertname" in group_by
     assert "severity" in group_by
     assert "source_network" not in group_by
+    cleanup_route = routing.split(
+        "- name: cleanup-failure-email", maxsplit=1
+    )[1]
+    assert 'alertname="WebcamCleanupFailed"' in routing
+    assert "send_resolved: false" in cleanup_route
 
     alerts = (ROOT / "prometheus/alerts.yml").read_text()
     assert 'webcam_discovery_run_total{result="failure"}' in alerts
+    assert "WebcamMaintenanceSchedulerDown" in alerts
+    assert "WebcamMaintenanceScheduleMissed" in alerts
+    assert 'maintenance_job="spool_cleanup",result="failure"' in alerts
+    assert 'task="cleanup",result="failure"' in alerts
     assert "WebcamMaintenanceSequenceSucceeded" in alerts
     assert 'result="success"} > time() - 900' in alerts
 
