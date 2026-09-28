@@ -96,7 +96,7 @@ container_state
 
 wait_until 2700
 echo "{\"checkpoint13_unquiet\":{\"event\":\"maintenance_started\",\"timestamp\":$(date +%s)}}"
-deployment/systemd/pilot/run-maintenance-sequence &
+deployment/maintenance/run daily &
 maintenance_pid="$!"
 
 wait_until "$run_seconds"

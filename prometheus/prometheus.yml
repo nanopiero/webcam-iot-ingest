@@ -57,12 +57,3 @@ scrape_configs:
   - job_name: cadvisor
     static_configs:
       - targets: ["cadvisor:8080"]
-  - job_name: checkpoint12-windy-worker
-    static_configs:
-      - targets: ["host.docker.internal:8113"]
-  - job_name: checkpoint12-fintraffic-worker
-    static_configs:
-      - targets: ["host.docker.internal:8114"]
-  - job_name: checkpoint12-skaping-worker
-    static_configs:
-      - targets: ["host.docker.internal:8115"]

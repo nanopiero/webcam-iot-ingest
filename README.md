@@ -147,7 +147,7 @@ Build and start PostgreSQL, MQTT, monitoring, the three continuous provider
 workers, and the maintenance scheduler:
 
 ```bash
-just container-stack-up
+just production-start
 ```
 
 Run short-lived jobs through the same application image:
@@ -167,9 +167,7 @@ just backup-database --dry-run
 
 These ordinary operational recipes use the `webcam-job` Compose service.
 Their `container-*` equivalents remain available for explicit administrative
-use. Historical checkpoint-12/checkpoint-13 and detached benchmark recipes
-remain host-based where necessary to reproduce earlier validation procedures;
-the new checkpoint-13 quiet baseline uses the containerized workers.
+use.
 
 The same runner used by the scheduler can be invoked explicitly when needed:
 
@@ -188,7 +186,7 @@ WINDY_MEMBER_COUNTRIES=DK just discover-windy --dry-run
 Stop the stack without deleting persistent volumes:
 
 ```bash
-just container-stack-stop
+just production-stop
 ```
 
 The permanent `maintenance-scheduler` Compose service owns production
@@ -200,19 +198,12 @@ Task-specific locks prevent two executions of the same task from overlapping,
 while `daily` and `cleanup` remain independent. Persisted scheduler state
 collapses missed intervals into one catch-up execution after downtime.
 
-The production `webcam-stack.service` in `deployment/systemd/pilot/` may start
-and stop the complete Compose stack at VM boot, but systemd does not schedule
-maintenance or launch host Python workers. Older installations must disable
-superseded discovery or maintenance timers to avoid duplicate executions.
-Normal interactive operation remains `just container-stack-up` and
-`just container-stack-stop`.
-
-The equivalent explicit production commands are:
-
-```bash
-just production-start
-just production-stop
-```
+The optional production `webcam-stack.service` in
+`deployment/systemd/pilot/` may start and stop the complete Compose stack at
+VM boot. It is the only supported systemd unit in this repository: systemd
+does not schedule maintenance or launch host Python workers. Older
+installations must disable and remove superseded discovery, maintenance,
+cleanup, backup, and checkpoint timers to avoid duplicate executions.
 
 Before production promotion, start the same runtime with a recorded three-day
 observation window:
@@ -613,59 +604,6 @@ During pilot validation only, each successful production maintenance sequence
 also raises a short-lived informational email alert. This temporary success
 notification is intentionally separate from the permanent failure alerts and
 can be removed after scheduled maintenance has been established operationally.
-
-## Checkpoint-12 systemd validation
-
-The units in `deployment/systemd/checkpoint12-validation/` are deliberately
-accelerated validation material, not production policy. They run:
-
-- three continuous ingestion workers, bounded to five selected jobs per epoch;
-- Windy ingestion and discovery restricted to Denmark;
-- sequential dry-run discovery for Windy, Fintraffic, and Skaping;
-- real cleanup of canonical image objects older than one hour;
-- a real full PostgreSQL backup to S3;
-- a maintenance cycle every ten minutes, measured from completion so cycles
-  cannot overlap.
-
-Install the units only on the current pilot VM after reviewing their absolute
-working-directory and executable paths:
-
-```bash
-sudo cp deployment/systemd/checkpoint12-validation/webcam-checkpoint12-* \
-  /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl start webcam-checkpoint12-infrastructure.service
-sudo systemctl start webcam-checkpoint12-ingestion@windy.service
-sudo systemctl start webcam-checkpoint12-ingestion@fintraffic.service
-sudo systemctl start webcam-checkpoint12-ingestion@skaping.service
-sudo systemctl enable --now webcam-checkpoint12-cycle.timer
-```
-
-Inspect the accelerated cycle with:
-
-```bash
-systemctl list-timers webcam-checkpoint12-cycle.timer
-systemctl status webcam-checkpoint12-cycle.service
-journalctl -u webcam-checkpoint12-cycle.service
-```
-
-Full-scale production scheduling and operational recovery drills belong to
-checkpoint 13.
-
-Before injecting checkpoint-13 failures, run the containerized quiet baseline
-described in
-[`manual_tests/run_checkpoint13_30min_quiet_baseline`](manual_tests/run_checkpoint13_30min_quiet_baseline).
-It starts all three workers, triggers one sequential discovery/backup/cleanup
-workflow after ten minutes, and stops ingestion after thirty minutes while
-allowing an active workflow to finish.
-
-The dedicated command list for the four-day, full-scope checkpoint-13 live
-test is in
-[`manual_tests/run_checkpoint13_four_day_full_live_test`](manual_tests/run_checkpoint13_four_day_full_live_test).
-It includes unit installation, restricted sudo policy, start/inspection/stop
-commands, its historical daily 12:00 UTC discovery, 24-hour spool retention,
-daily backup,
-and the automatic four-day deadline.
 
 The checkpoint-13 unquiet recovery exercise starts the full three-network
 stack, crashes only the Windy worker process after 15 minutes, restarts PostgreSQL

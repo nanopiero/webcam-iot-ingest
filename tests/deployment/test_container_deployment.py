@@ -189,8 +189,8 @@ def test_compose_owns_scheduling_and_systemd_has_no_maintenance_timer() -> None:
 
     assert "--profile application --profile monitoring up -d" in stack
     assert "python -m ingestion" not in stack
-    assert not list(directory.glob("*maintenance*.timer"))
-    assert not list(directory.glob("*spool-cleanup*.timer"))
+    assert {path.name for path in directory.iterdir()} == {"webcam-stack.service"}
+    assert not list((ROOT / "deployment/systemd").rglob("*.timer"))
     assert [name for name in services if "scheduler" in name] == [
         "maintenance-scheduler"
     ]
@@ -234,7 +234,7 @@ def test_compose_owns_scheduling_and_systemd_has_no_maintenance_timer() -> None:
 def test_operational_just_recipes_use_container_jobs() -> None:
     justfile = (ROOT / "justfile").read_text()
     operational = justfile.split(
-        "# One dry-run discovery used by the accelerated checkpoint-12"
+        "# Run a bounded Windy ingestion sample"
     )[0]
 
     assert "uv run" not in operational
@@ -251,45 +251,26 @@ def test_operational_just_recipes_use_container_jobs() -> None:
 def test_production_and_three_day_validation_recipes_use_the_compose_stack() -> None:
     justfile = (ROOT / "justfile").read_text()
 
-    assert "production-start: container-stack-up" in justfile
-    assert "production-stop: container-stack-stop" in justfile
+    assert "production-start:" in justfile
+    assert "production-stop:" in justfile
     assert "three-day-production-test: production-start" in justfile
+    assert "container-stack-up:" not in justfile
+    assert "container-stack-stop:" not in justfile
+    assert "checkpoint12-discover" not in justfile
+    assert "checkpoint12-ingest" not in justfile
+    assert "checkpoint13-ingest" not in justfile
+    assert (
+        "docker compose --env-file .env --profile application "
+        "--profile monitoring up -d --build"
+    ) in justfile
+    assert (
+        "docker compose --env-file .env --profile application "
+        "--profile monitoring stop"
+    ) in justfile
     assert "3 * 24 * 60 * 60" in justfile
     assert "webcam-three-day-production-test.json" in justfile
     assert "sleep 259200" not in justfile
     assert "the stack will remain active until: just production-stop" in justfile
-
-
-def test_checkpoint13_quiet_baseline_has_one_delayed_sequential_workflow() -> None:
-    directory = ROOT / "deployment/systemd/checkpoint13-30min-baseline"
-    workflow = (directory / "run-workflow").read_text()
-    workflow_timer = (
-        directory / "webcam-checkpoint13-baseline-workflow.timer"
-    ).read_text()
-    workflow_service = (
-        directory / "webcam-checkpoint13-baseline-workflow.service"
-    ).read_text()
-    stop_timer = (
-        directory / "webcam-checkpoint13-baseline-stop.timer"
-    ).read_text()
-    stack = (
-        directory / "webcam-checkpoint13-baseline-stack.service"
-    ).read_text()
-
-    expected = [
-        "discovery@${network}.service",
-        "baseline-db-backup.service",
-        "baseline-spool-cleanup.service",
-    ]
-    positions = [workflow.index(value) for value in expected]
-    assert positions == sorted(positions)
-    assert "OnActiveSec=10min" in workflow_timer
-    assert "OnActiveSec=30min" in stop_timer
-    assert "PartOf=webcam-checkpoint13-baseline.target" not in workflow_service
-    assert "--profile application up -d --build" in stack
-    assert "stop windy-worker fintraffic-worker skaping-worker" in stack
-
-
 def test_quiet_maintenance_uses_production_order_and_optional_summary() -> None:
     maintenance = (ROOT / "deployment/benchmarks/run-quiet-maintenance").read_text()
     positions = [

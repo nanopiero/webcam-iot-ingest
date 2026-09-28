@@ -1,6 +1,0 @@
-[Unit]
-Description=Stop checkpoint-13 baseline ingestion workers
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/systemctl --no-block stop webcam-checkpoint13-baseline.target

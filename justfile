@@ -129,21 +129,15 @@ restore-database object_key:
         windy-worker fintraffic-worker skaping-worker
     echo "Restore validated; ingestion workers restarted."
 
-# Build and start the final containerized ingestion and monitoring stack.
-container-stack-up:
-    docker compose --env-file .env --profile application --profile monitoring up -d --build
-
-# Stop the final containerized stack without removing persistent volumes.
-container-stack-stop:
-    docker compose --env-file .env --profile application --profile monitoring stop
-
 # Build and start the complete production stack, including the permanent
 # maintenance scheduler, then reload mounted monitoring configuration.
-production-start: container-stack-up
+production-start:
+    docker compose --env-file .env --profile application --profile monitoring up -d --build
     docker compose --env-file .env --profile monitoring kill -s SIGHUP prometheus alertmanager
 
 # Stop the complete production stack without deleting persistent volumes.
-production-stop: container-stack-stop
+production-stop:
+    docker compose --env-file .env --profile application --profile monitoring stop
 
 # Start the real production runtime and record a three-day validation window.
 # The stack is intentionally not stopped automatically at the deadline: review
@@ -178,7 +172,7 @@ container-discover network *args:
     set -euo pipefail
     network="$1"
     shift
-    exec deployment/systemd/pilot/run-discovery "$network" "$@"
+    exec deployment/discovery/run "$network" "$@"
 
 # Run transformation-scoped image cleanup in a short-lived container.
 container-cleanup-spool older_than_hours="24" *args:
@@ -207,134 +201,6 @@ container-cleanup-database-backups current_key *args:
     exec docker compose --env-file .env --profile jobs run --rm \
         webcam-job python -m database.database_backup_cleanup \
         --current-key "$current_key" "$@"
-
-# One dry-run discovery used by the accelerated checkpoint-12 systemd chain.
-checkpoint12-discover network:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    case "$1" in
-        windy)
-            exec env WINDY_MEMBER_COUNTRIES=DK \
-                UV_CACHE_DIR=/tmp/webcam-uv-cache \
-                uv run --env-file .env python -m \
-                discovery.windy.windy_discovery_workflow --dry-run
-            ;;
-        fintraffic)
-            exec env UV_CACHE_DIR=/tmp/webcam-uv-cache \
-                uv run --env-file .env python -m \
-                discovery.fintraffic.fintraffic_discovery_workflow --dry-run
-            ;;
-        skaping)
-            exec env UV_CACHE_DIR=/tmp/webcam-uv-cache \
-                uv run --env-file .env python -m \
-                discovery.skaping.skaping_discovery_workflow --dry-run
-            ;;
-        *)
-            echo "network must be windy, fintraffic, or skaping" >&2
-            exit 2
-            ;;
-    esac
-
-# Checkpoint-12 validation worker: deliberately bounded, not production policy.
-checkpoint12-ingest network limit="5":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    network="$1"
-    limit="$2"
-    case "$network" in
-        windy)
-            module="ingestion.windy.worker"
-            network_args=(--network win --countries DK)
-            port=8113
-            ;;
-        fintraffic)
-            module="ingestion.fintraffic.worker"
-            network_args=()
-            port=8114
-            ;;
-        skaping)
-            module="ingestion.skaping.worker"
-            network_args=()
-            port=8115
-            ;;
-        *)
-            echo "network must be windy, fintraffic, or skaping" >&2
-            exit 2
-            ;;
-    esac
-    exec env \
-        MQTT_HOST=127.0.0.1 \
-        INGESTION_HEALTH_HOST=0.0.0.0 \
-        INGESTION_HEALTH_PORT="$port" \
-        INGESTION_WORKER_THREADS="$limit" \
-        INGESTION_DATABASE_POOL_SIZE="$limit" \
-        INGESTION_MAX_JOBS_PER_EPOCH="$limit" \
-        INGESTION_IDLE_DELAY_S=0 \
-        UV_CACHE_DIR=/tmp/webcam-uv-cache \
-        uv run --env-file .env python -m "$module" \
-        --max-jobs "$limit" --stagger-initial-polling "${network_args[@]}"
-
-# Full-scope worker used by the checkpoint-13 four-day live test.
-checkpoint13-ingest network:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    case "$1" in
-        windy)
-            module="ingestion.windy.worker"
-            max_jobs=30000
-            threads=100
-            pool_size=60
-            port=8013
-            network_args=(--network win)
-            provider_env=(
-                WINDY_INGESTION_REQUEST_DELAY_S=0.01
-                WINDY_FRESHNESS_QUERY_RETRY_COUNT=0
-                WINDY_DOWNLOAD_RETRY_COUNT=0
-            )
-            ;;
-        fintraffic)
-            module="ingestion.fintraffic.worker"
-            max_jobs=3000
-            threads=50
-            pool_size=20
-            port=8014
-            network_args=()
-            provider_env=(
-                FINTRAFFIC_INGESTION_REQUEST_DELAY_S=0.1
-                FINTRAFFIC_FRESHNESS_QUERY_RETRY_COUNT=0
-                FINTRAFFIC_DOWNLOAD_RETRY_COUNT=0
-            )
-            ;;
-        skaping)
-            module="ingestion.skaping.worker"
-            max_jobs=100
-            threads=16
-            pool_size=8
-            port=8015
-            network_args=()
-            provider_env=(
-                SKAPING_INGESTION_REQUEST_DELAY_S=0.1
-                SKAPING_FRESHNESS_QUERY_RETRY_COUNT=0
-                SKAPING_DOWNLOAD_RETRY_COUNT=0
-            )
-            ;;
-        *)
-            echo "network must be windy, fintraffic, or skaping" >&2
-            exit 2
-            ;;
-    esac
-    exec env \
-        MQTT_HOST=127.0.0.1 \
-        INGESTION_HEALTH_HOST=0.0.0.0 \
-        INGESTION_HEALTH_PORT="$port" \
-        INGESTION_WORKER_THREADS="$threads" \
-        INGESTION_DATABASE_POOL_SIZE="$pool_size" \
-        INGESTION_MAX_JOBS_PER_EPOCH="$max_jobs" \
-        INGESTION_IDLE_DELAY_S=0 \
-        UV_CACHE_DIR=/tmp/webcam-uv-cache \
-        "${provider_env[@]}" \
-        uv run --env-file .env python -m "$module" \
-        --max-jobs "$max_jobs" --stagger-initial-polling "${network_args[@]}"
 
 # Run a bounded Windy ingestion sample. Add --dry-run to avoid S3/MQTT.
 ingest-windy *args:

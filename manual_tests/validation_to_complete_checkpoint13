@@ -18,39 +18,32 @@ Run as `codexuser` from the repository root:
     UV_CACHE_DIR=/tmp/webcam-uv-cache uv run pytest -q tests
     docker compose --env-file .env --profile application \
       --profile monitoring --profile jobs config --quiet
-    bash -n deployment/systemd/pilot/run-maintenance-sequence
+    bash -n deployment/maintenance/run
     bash -n deployment/benchmarks/run-checkpoint13-unquiet
-    systemd-analyze verify deployment/systemd/pilot/*.service \
-      deployment/systemd/pilot/*.timer
+    systemd-analyze verify deployment/systemd/pilot/webcam-stack.service
     git diff --check
 
 Confirm the workers use `restart: unless-stopped`, have health checks, and
 Windy enables batched freshness plus the bounded-minimum period strategy.
 
-2. Install the production pilot units
--------------------------------------
+2. Install optional VM-boot integration
+---------------------------------------
 
 Run from the administrator's own checkout:
 
     REPO_ROOT=$(git rev-parse --show-toplevel)
-    sudo install -m 0644 "$REPO_ROOT"/deployment/systemd/pilot/*.service \
-      "$REPO_ROOT"/deployment/systemd/pilot/*.timer \
+    sudo install -m 0644 \
+      "$REPO_ROOT"/deployment/systemd/pilot/webcam-stack.service \
       /etc/systemd/system/
-    sudo systemctl disable --now webcam-discovery.timer \
-      webcam-discovery-sequence.service 2>/dev/null || true
     sudo systemctl daemon-reload
     sudo systemd-analyze verify \
-      /etc/systemd/system/webcam-stack.service \
-      /etc/systemd/system/webcam-maintenance-sequence.service \
-      /etc/systemd/system/webcam-maintenance.timer
+      /etc/systemd/system/webcam-stack.service
 
-The units intentionally run as `codexuser`; the administrator only installs
-and controls them. The disabled discovery timer is the superseded two-schedule
-checkpoint-12/early-checkpoint-13 unit; the cleanup-first timer replaces it.
-Enable boot integration after the unquiet test is accepted:
+The unit intentionally runs as `codexuser`; the administrator only installs
+and controls it. Compose's `maintenance-scheduler` owns daily and cleanup
+scheduling. Enable boot integration after the unquiet test is accepted:
 
     sudo systemctl enable webcam-stack.service
-    sudo systemctl enable webcam-maintenance.timer
 
 3. Validate a real backup without touching the live database
 -------------------------------------------------------------
@@ -111,8 +104,9 @@ cleanup or backup would invalidate the drill.
 -------------------------------------
 
 After accepting the unquiet run, separately schedule an operator-supervised VM
-reboot. Confirm the stack, worker health, monitoring, and maintenance timer
-return. Keep any live restore separate and require explicit owner approval.
+reboot. Confirm the stack, worker health, monitoring, and Compose maintenance
+scheduler return. Keep any live restore separate and require explicit owner
+approval.
 
 Email notification is deferred. Ignored local address/password files are only
 placeholders and must not be committed or used without valid SMTP credentials.

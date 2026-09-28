@@ -79,13 +79,10 @@ Confirm only the latest preceding available day in the same month is selected.
 6. Compose and systemd handoff
 ------------------------------
 
-Install the reviewed files from `deployment/systemd/pilot/` under
-`/etc/systemd/system` with the intended `/opt/webcam-ingestion` deployment
-path. Enable `webcam-stack.service`, `webcam-discovery.timer`, and
-`webcam-maintenance.timer`.
-
-Confirm Compose owns the three continuously running worker containers and
-their restart policies. Confirm systemd schedules sequential discovery at
-12:00 UTC and backup followed by cleanup at 01:00 UTC. Check graceful stop,
-container restart, persistent database state, worker health, metrics, and
-separate logs before beginning checkpoint 13 drills.
+Install only `deployment/systemd/pilot/webcam-stack.service` under
+`/etc/systemd/system` when VM-boot integration is required. Confirm Compose
+owns the continuously running workers, restart policies, and the permanent
+maintenance scheduler. Systemd must not schedule discovery, cleanup, or
+backup. Check graceful stop, container restart, persistent database state,
+worker health, metrics, and separate logs before beginning checkpoint 13
+drills.

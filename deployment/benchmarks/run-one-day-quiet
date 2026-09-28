@@ -59,7 +59,7 @@ echo "{\"scheduled_quiet_test\":{\"event\":\"started\",\"timestamp\":$started,\"
     fi
     echo "{\"scheduled_quiet_test\":{\"event\":\"maintenance_started\",\"timestamp\":$(date +%s)}}"
     result=0
-    deployment/systemd/pilot/run-maintenance-sequence || result=$?
+    deployment/maintenance/run daily || result=$?
     echo "{\"scheduled_quiet_test\":{\"event\":\"maintenance_completed\",\"result\":$result,\"timestamp\":$(date +%s)}}"
     exit "$result"
 ) &
