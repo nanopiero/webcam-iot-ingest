@@ -824,8 +824,8 @@ period-replacement-test duration="30m" modulus="10":
     echo "log: $log"
     echo "Grafana: tunnel local port 3000 to remote 127.0.0.1:3000"
 
-# Run all production-scope workers for 24 hours and trigger exactly one
-# cleanup-first maintenance sequence at the next 00:00 UTC.
+# Historical 24-hour worker benchmark with one combined maintenance sequence.
+# This does not reproduce the current independent production schedules.
 one-day-quiet-test:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -841,8 +841,8 @@ one-day-quiet-test:
     echo "period direct-replacement modulus: 250 for win, fin, and ska"
     echo "Grafana: tunnel local port 3000 to remote 127.0.0.1:3000"
 
-# Final production-scope validation: all workers for 36 hours and exactly one
-# cleanup-first maintenance sequence at the next 00:00 UTC.
+# Historical 36-hour worker benchmark with one combined maintenance sequence.
+# This does not reproduce the current independent production schedules.
 final-36-hour-test:
     #!/usr/bin/env bash
     set -euo pipefail

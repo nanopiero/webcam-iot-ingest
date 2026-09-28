@@ -75,16 +75,23 @@ Avoid `just destroy` unless deleting all local service data is intentional.
 
 ## Spool cleanup and database backup
 
+The production scheduler runs transformation-scoped spool cleanup every two
+hours, at each odd UTC hour, with a two-hour deletion threshold. Because an
+object becomes eligible only after it is strictly older than two hours and is
+then removed by the next run, nominal spool availability is approximately two
+to four hours. This schedule is independent from daily discovery and database
+backup.
+
 Inspect canonical derived-image objects older than an exact number of hours:
 
 ```bash
-just cleanup-spool 24 --dry-run
+just cleanup-spool 2 --dry-run
 ```
 
 Remove the qualifying image objects:
 
 ```bash
-just cleanup-spool 24
+just cleanup-spool 2
 ```
 
 Only keys matching the configured prefix and canonical
@@ -136,8 +143,8 @@ automatically restores an S3 dump.
 
 ## Containerized pilot deployment
 
-Build and start PostgreSQL, MQTT, monitoring, and the three continuous
-provider workers:
+Build and start PostgreSQL, MQTT, monitoring, the three continuous provider
+workers, and the maintenance scheduler:
 
 ```bash
 just container-stack-up
@@ -154,7 +161,7 @@ just ingest-windy --countries DK --limit 3 --dry-run
 just ingest-fintraffic --limit 3 --dry-run
 just ingest-skaping --limit 3 --dry-run
 
-just cleanup-spool 24 --dry-run
+just cleanup-spool 2 --dry-run
 just backup-database --dry-run
 ```
 
@@ -163,6 +170,13 @@ Their `container-*` equivalents remain available for explicit administrative
 use. Historical checkpoint-12/checkpoint-13 and detached benchmark recipes
 remain host-based where necessary to reproduce earlier validation procedures;
 the new checkpoint-13 quiet baseline uses the containerized workers.
+
+The same runner used by the scheduler can be invoked explicitly when needed:
+
+```bash
+just maintenance daily
+just maintenance cleanup
+```
 
 For a bounded Windy discovery dry-run, an operator may override the configured
 member-country scope without changing `.env`:
@@ -177,15 +191,21 @@ Stop the stack without deleting persistent volumes:
 just container-stack-stop
 ```
 
-The production-oriented units in `deployment/systemd/pilot/` let systemd start
-the Compose stack at VM boot and trigger one non-overlapping maintenance
-sequence daily at 00:00 UTC. The sequence attempts S3 image cleanup first,
-then Windy, Fintraffic, and Skaping discovery, then a verified PostgreSQL
-backup and its conservative retention cleanup. Every step has a timeout;
-failure is recorded but does not suppress later steps. Compose owns worker
-restart policies; systemd does not launch host Python workers.
-When upgrading an earlier pilot installation, disable the superseded
-`webcam-discovery.timer`; discovery now belongs to the maintenance sequence.
+The permanent `maintenance-scheduler` Compose service owns production
+maintenance scheduling. It starts `daily` at 00:00 UTC and `cleanup` at each
+odd UTC hour. `daily` attempts Windy, Fintraffic, and Skaping discovery in
+that order, followed by verified PostgreSQL backup and backup retention. Every
+step has a timeout; a failure is recorded but does not suppress later steps.
+Task-specific locks prevent two executions of the same task from overlapping,
+while `daily` and `cleanup` remain independent. Persisted scheduler state
+collapses missed intervals into one catch-up execution after downtime.
+
+The production `webcam-stack.service` in `deployment/systemd/pilot/` may start
+and stop the complete Compose stack at VM boot, but systemd does not schedule
+maintenance or launch host Python workers. Older installations must disable
+superseded discovery or maintenance timers to avoid duplicate executions.
+Normal interactive operation remains `just container-stack-up` and
+`just container-stack-stop`.
 The worker health and Prometheus endpoints use internal ports 8002 (Windy),
 8003 (Fintraffic), and 8004 (Skaping). CPU, memory, and graceful-stop limits
 are configurable through the deployment environment; reproducible defaults
@@ -277,6 +297,8 @@ just ingest-skaping --limit 4 --publish
 | `MAINTENANCE_METRICS_ENABLED` | `true` | Publish cleanup, backup, and restore metrics through Pushgateway |
 | `MAINTENANCE_METRICS_GATEWAY_URL` | `http://localhost:9091` | Maintenance-job Pushgateway |
 | `MAINTENANCE_METRICS_PUSH_TIMEOUT_S` | `5` | Maintenance metric push timeout |
+| `WEBCAM_SPOOL_RETENTION_HOURS` | `2` | Strict production image-spool deletion threshold; cleanup remains configurable for manual runs |
+| `WEBCAM_MAINTENANCE_SCHEDULER_METRICS_INTERVAL_S` | `60` | Scheduler heartbeat and state publication interval |
 | `DATABASE_BACKUP_S3_PREFIX` | `backups/postgresql` | S3 namespace for timestamped database dumps |
 | `PG_DUMP_MODE` | `docker-compose` in `.env.example` | Host-side legacy mode; the operational container recipe forces direct execution with its bundled PostgreSQL 16.9 client |
 
@@ -492,11 +514,12 @@ just two-hour-full-alert-test
 ```
 
 This assigns Windy 6 CPUs and 84 threads, Fintraffic 0.5 CPU and 4 threads,
-and Skaping 0.5 CPU and 2 threads. A separate 0.5-CPU maintenance container
-first cleans T0 images older than 24 hours, then runs sequential Windy,
+and Skaping 0.5 CPU and 2 threads. Its benchmark-only combined maintenance
+helper first cleans T0 images older than 24 hours, then runs sequential Windy,
 Fintraffic, and Skaping discovery, and finally creates and verifies the
-PostgreSQL backup. The cycles start at T+20 and, when requested, T+60. At peak, the
-configured quotas total 7.5 CPUs, leaving approximately 0.5 CPU on an
+PostgreSQL backup. It intentionally does not reproduce the independent
+production schedules. The cycles start at T+20 and, when requested, T+60. At
+peak, the configured quotas total 7.5 CPUs, leaving approximately 0.5 CPU on an
 eight-core VM for PostgreSQL, MQTT, and monitoring. All three workers use
 their normal Compose service aliases and internal metrics ports 8002, 8003,
 and 8004, so Prometheus scrapes them through the production
@@ -505,30 +528,32 @@ the complete S3/MQTT publication path. If the first maintenance cycle overruns
 T+60, the second starts as soon as the first completes rather than overlapping
 it.
 
-For a production-scope one-day quiet test with exactly one maintenance run at
-the next 00:00 UTC, use:
+For the historical one-day quiet benchmark with exactly one combined
+maintenance run at the next 00:00 UTC, use:
 
 ```bash
 just one-day-quiet-test
 ```
 
-The detached run lasts 24 hours from worker startup. It explicitly restores
-the deterministic period-replacement modulus to 250 for Windy, Fintraffic,
-and Skaping, uses the validated 6/0.5/0.5 CPU and 84/4/2 thread allocation,
-and invokes the cleanup-first production maintenance sequence once. The
+This historical detached benchmark lasts 24 hours from worker startup. It
+explicitly restores the deterministic period-replacement modulus to 250 for
+Windy, Fintraffic, and Skaping, uses the validated 6/0.5/0.5 CPU and 84/4/2
+thread allocation, and invokes its benchmark-only combined maintenance
+sequence once. It does not validate the current permanent scheduler. The
 printed screen-session name and `/tmp` log path can be used to follow it.
 
-For the final production-scope validation, run all three workers for 36 hours
-with exactly one maintenance sequence at the next 00:00 UTC:
+For the corresponding historical 36-hour benchmark, run all three workers
+with exactly one combined maintenance sequence at the next 00:00 UTC:
 
 ```bash
 just final-36-hour-test
 ```
 
-This uses the same 6/0.5/0.5 CPU and 84/4/2 thread allocation, deterministic
-startup staggering, production period-replacement modulus, complete S3/MQTT
-path, and cleanup-first maintenance sequence as the one-day test. It prints
-the detached Screen session name and log path.
+This historical benchmark uses the same 6/0.5/0.5 CPU and 84/4/2 thread
+allocation, deterministic startup staggering, production period-replacement
+modulus, complete S3/MQTT path, and benchmark-only combined maintenance
+sequence as the one-day test. It prints the detached Screen session name and
+log path.
 
 ### Reproducible monitoring versions
 
@@ -557,11 +582,13 @@ the Pushgateway and Grafana displays retained results after each process exits.
 The monitoring profile also starts Alertmanager plus PostgreSQL, host, and
 container exporters.
 Grafana provisions an **Infrastructure health** dashboard and a
-**Maintenance jobs** dashboard. Alert rules cover unavailable
-infrastructure targets, unavailable checkpoint workers, low host disk space,
-PostgreSQL failure, and cleanup or backup failures. Alertmanager groups these
-alerts, delivers email notifications, and sends a resolved notification when
-the condition clears.
+**Maintenance jobs** dashboard. Alert rules cover unavailable infrastructure
+targets, unavailable checkpoint workers, low host disk space, PostgreSQL
+failure, scheduler heartbeat or missed-slot failures, and cleanup or backup
+failures. Alertmanager groups these alerts and delivers email notifications.
+Cleanup email is failure-only: success clears its Prometheus alert state
+without sending either a success or resolved email. Other alerts retain their
+configured resolved notifications.
 
 During pilot validation only, each successful production maintenance sequence
 also raises a short-lived informational email alert. This temporary success
