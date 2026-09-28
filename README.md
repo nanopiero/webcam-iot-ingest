@@ -43,9 +43,9 @@ API docs available at http://localhost:8009/docs
 
 ## Local pilot infrastructure
 
-PostgreSQL and Mosquitto run locally through Docker Compose. Their host
-ports bind to loopback only. Create local configuration and a database
-password before starting them:
+PostgreSQL and Mosquitto run locally through Docker Compose. Their host ports
+bind to loopback by default. Create local configuration and a database password
+before starting them:
 
 ```bash
 cp .env.example .env
@@ -64,9 +64,12 @@ not start Prometheus, Grafana, discovery, or ingestion workers, and normal
 invocations preserve the existing PostgreSQL volume and its data.
 
 The `.env` and `.secrets/` paths are ignored by Git. Do not put provider,
-database, MQTT, or S3 credentials in committed configuration. The local
-Mosquitto listener permits anonymous clients and must not be exposed beyond
-the VM loopback interface.
+database, MQTT, or S3 credentials in committed configuration. The Mosquitto
+listener currently permits anonymous clients. Keep
+`MQTT_BIND_ADDRESS=127.0.0.1` unless downstream services need direct access;
+in that case, use only the VM's private tenancy address and restrict port 1883
+to the trusted network. Do not bind it publicly without first adding broker
+authentication and transport security.
 
 The PostgreSQL container initializes the pilot `network`, `site`, and
 `source_stream` tables from `database/schema/001_pilot_schema.sql` on a new
@@ -284,6 +287,7 @@ just ingest-skaping --limit 4 --publish
 |---|---|---|
 | `MQTT_HOST` | `mqtt` | Broker hostname |
 | `MQTT_PORT` | `1883` | Broker port |
+| `MQTT_BIND_ADDRESS` | `127.0.0.1` | Host interface publishing the broker; use only a trusted private address for remote consumers |
 | `MQTT_USERNAME` | — | Broker username |
 | `MQTT_PASSWORD` | — | Broker password |
 | `MQTT_TLS` | `False` | Enable TLS |

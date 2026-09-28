@@ -128,6 +128,22 @@ def test_persistent_state_and_short_lived_job_are_declared() -> None:
     }
 
 
+def test_mqtt_host_publication_defaults_to_loopback() -> None:
+    mqtt = _compose_config()["services"]["mqtt"]
+
+    assert mqtt["ports"] == [
+        {
+            "mode": "ingress",
+            "target": 1883,
+            "published": "1883",
+            "protocol": "tcp",
+            "host_ip": "127.0.0.1",
+        }
+    ]
+    compose = (ROOT / "docker-compose.yml").read_text()
+    assert "${MQTT_BIND_ADDRESS:-127.0.0.1}:1883:1883" in compose
+
+
 def test_alertmanager_is_configured_for_prometheus_email_routing() -> None:
     config = _compose_config()
     alertmanager = config["services"]["alertmanager"]
