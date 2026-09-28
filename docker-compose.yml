@@ -31,6 +31,7 @@ x-maintenance-runtime: &maintenance-runtime
     MAINTENANCE_METRICS_GATEWAY_URL: http://pushgateway:9091
     ALERTMANAGER_URL: http://alertmanager:9093
     WEBCAM_MAINTENANCE_STATE_DIRECTORY: /var/lib/webcam-maintenance
+    WEBCAM_SPOOL_RETENTION_HOURS: ${WEBCAM_SPOOL_RETENTION_HOURS:-2}
   volumes:
     - maintenance-state:/var/lib/webcam-maintenance
   secrets:
@@ -327,7 +328,9 @@ services:
     stop_grace_period: 40s
     cpus: ${MAINTENANCE_SCHEDULER_CPU_LIMIT:-1.0}
     mem_limit: ${MAINTENANCE_SCHEDULER_MEMORY_LIMIT:-1g}
-    depends_on: {}
+    depends_on:
+      schema-migrate:
+        condition: service_completed_successfully
 
   mqtt:
     image: eclipse-mosquitto:2.0.21

@@ -59,6 +59,15 @@ def test_cleanup_selects_only_scoped_spool_cleanup(tmp_path: Path) -> None:
     assert step.command[step.command.index("--transformation-prefix") + 1] == "T0"
 
 
+def test_cleanup_defaults_to_production_two_hour_retention(tmp_path: Path) -> None:
+    environment = _environment(tmp_path)
+    del environment["WEBCAM_SPOOL_RETENTION_HOURS"]
+
+    step = maintenance_steps("cleanup", environment)[0]
+
+    assert step.command[step.command.index("--older-than-hours") + 1] == "2.0"
+
+
 def test_daily_failure_does_not_prevent_later_steps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

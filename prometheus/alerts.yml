@@ -98,7 +98,10 @@ groups:
         annotations:
           summary: "An explicit PostgreSQL restore attempt failed"
       - alert: WebcamMaintenanceSequenceFailed
-        expr: webcam_maintenance_sequence_last_run_unixtime{result="failure"} > time() - 86400
+        expr: |
+          webcam_maintenance_sequence_last_run_unixtime{result="failure"} > time() - 86400
+          or
+          webcam_maintenance_scheduler_last_result{task="daily",result="launch_failure"} == 1
         labels:
           severity: critical
         annotations:

@@ -9,6 +9,7 @@ from maintenance.scheduler import (
     FileStateStore,
     MaintenanceScheduler,
     SchedulerMetrics,
+    _launch_retry_delay_s,
     schedule_slot,
     scheduled_tasks,
 )
@@ -249,6 +250,84 @@ def test_completed_failure_is_not_retried_until_a_later_slot(tmp_path) -> None:
 
     restarted.tick(utc(3, 0, 1))
     assert len(processes) == 2
+
+
+def test_launch_failure_stays_pending_and_retries_with_bounded_backoff() -> None:
+    attempts: list[tuple[str, ...]] = []
+
+    def factory(command):
+        attempts.append(command)
+        if len(attempts) <= 2:
+            raise OSError("cannot fork")
+        return Process(command)
+
+    scheduler = MaintenanceScheduler(process_factory=factory)
+    scheduler.tick(utc(1, 0, 1))
+    task_state = scheduler._task_state("cleanup")
+    completed_before_retry = task_state["last_completed_slot"]
+
+    assert task_state["last_result"] == "launch_failure"
+    assert task_state["last_started_slot"] == completed_before_retry
+    assert scheduler.running == {}
+
+    scheduler.tick(utc(1, 0, 30))
+    assert len(attempts) == 1
+
+    scheduler.tick(utc(1, 0, 31))
+    assert len(attempts) == 2
+    assert scheduler._task_state("cleanup")["last_completed_slot"] == (
+        completed_before_retry
+    )
+
+    scheduler.tick(utc(1, 1, 30))
+    assert len(attempts) == 2
+
+    scheduler.tick(utc(1, 1, 31))
+    assert len(attempts) == 3
+    assert scheduler._task_state("cleanup")["last_result"] == "running"
+    assert scheduler._task_state("cleanup")["last_started_slot"] == (
+        "2026-09-28T01:00:00+00:00"
+    )
+    assert scheduler._task_state("cleanup")["last_completed_slot"] == (
+        completed_before_retry
+    )
+    assert "cleanup" in scheduler.running
+
+
+@pytest.mark.parametrize(
+    ("failure_count", "expected_delay_s"),
+    [(1, 30), (2, 60), (3, 120), (4, 240), (5, 300), (1000, 300)],
+)
+def test_launch_retry_backoff_is_capped(
+    failure_count: int, expected_delay_s: int
+) -> None:
+    assert _launch_retry_delay_s(failure_count) == expected_delay_s
+
+
+def test_launch_failure_is_observable_as_a_pending_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    push = Mock()
+    monkeypatch.setattr("maintenance.scheduler.push_to_gateway", push)
+
+    def fail_to_launch(_command):
+        raise OSError("cannot fork")
+
+    scheduler = MaintenanceScheduler(process_factory=fail_to_launch)
+    now = utc(1, 0, 1)
+    scheduler.tick(now)
+    metrics = SchedulerMetrics(
+        MaintenanceMetricsConfig(True, "http://pushgateway:9091", 5)
+    )
+
+    assert metrics.publish(scheduler, now, force=True)
+
+    payload = generate_latest(push.call_args.kwargs["registry"])
+    assert b'webcam_maintenance_scheduler_slot_pending{task="cleanup"} 1.0' in payload
+    assert (
+        b'webcam_maintenance_scheduler_last_result{result="launch_failure",task="cleanup"}'
+        in payload
+    )
 
 
 def test_file_state_is_atomic_and_contains_no_temporary_files(tmp_path) -> None:

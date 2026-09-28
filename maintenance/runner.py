@@ -57,7 +57,7 @@ def maintenance_steps(
     python = sys.executable
     if task == "cleanup":
         retention_hours = _positive_number(
-            environment, "WEBCAM_SPOOL_RETENTION_HOURS", 24
+            environment, "WEBCAM_SPOOL_RETENTION_HOURS", 2
         )
         return (
             MaintenanceStep(

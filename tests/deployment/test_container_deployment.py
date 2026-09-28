@@ -167,6 +167,7 @@ def test_alertmanager_is_configured_for_prometheus_email_routing() -> None:
     assert "WebcamMaintenanceScheduleMissed" in alerts
     assert 'maintenance_job="spool_cleanup",result="failure"' in alerts
     assert 'task="cleanup",result="failure"' in alerts
+    assert 'task="daily",result="launch_failure"' in alerts
     assert "WebcamMaintenanceSequenceSucceeded" in alerts
     assert 'result="success"} > time() - 900' in alerts
 
@@ -201,7 +202,12 @@ def test_compose_owns_scheduling_and_systemd_has_no_maintenance_timer() -> None:
     ]
     assert scheduler_service["restart"] == "unless-stopped"
     assert scheduler_service["stop_grace_period"] == "40s"
-    assert scheduler_service.get("depends_on", {}) == {}
+    assert scheduler_service["depends_on"] == {
+        "schema-migrate": {
+            "condition": "service_completed_successfully",
+            "required": True,
+        }
+    }
     assert scheduler_service["environment"]["WEBCAM_SPOOL_RETENTION_HOURS"] == "2"
     assert any(
         volume["source"] == "maintenance-state"

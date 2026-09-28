@@ -23,6 +23,8 @@ TASK_DAILY = "daily"
 TASK_CLEANUP = "cleanup"
 TASKS = (TASK_DAILY, TASK_CLEANUP)
 STATE_VERSION = 1
+LAUNCH_RETRY_INITIAL_S = 30
+LAUNCH_RETRY_MAX_S = 300
 
 
 def scheduled_tasks(now: datetime) -> tuple[str, ...]:
@@ -80,6 +82,17 @@ def next_schedule_slot(task: str, now: datetime) -> datetime:
 
 def _slot_text(slot: datetime) -> str:
     return slot.astimezone(timezone.utc).isoformat()
+
+
+def _launch_retry_delay_s(failure_count: int) -> int:
+    if failure_count < 1:
+        raise ValueError("launch failure count must be positive")
+    delay = LAUNCH_RETRY_INITIAL_S
+    for _ in range(1, failure_count):
+        delay = min(delay * 2, LAUNCH_RETRY_MAX_S)
+        if delay == LAUNCH_RETRY_MAX_S:
+            break
+    return delay
 
 
 def _parse_slot(value: object) -> datetime:
@@ -377,6 +390,8 @@ class MaintenanceScheduler:
         self.state: dict[str, object] | None = None
         self.running: dict[str, RunningTask] = {}
         self.reported_overlaps: dict[str, str] = {}
+        self.launch_failure_count: dict[str, int] = {}
+        self.launch_retry_after: dict[str, datetime] = {}
 
     def _ensure_state(self, now: datetime) -> bool:
         if self.state is not None:
@@ -458,23 +473,29 @@ class MaintenanceScheduler:
                     )
                     self.reported_overlaps[task] = deferred_slot
                 continue
+            retry_after = self.launch_retry_after.get(task)
+            if retry_after is not None and now < retry_after:
+                continue
             slot = _slot_text(due_slot)
-            task_state["last_started_slot"] = slot
-            task_state["last_result"] = "running"
-            self._save()
             command = (sys.executable, "-m", "maintenance.runner", task)
             try:
                 process = self.process_factory(command)
             except Exception as error:
-                task_state["last_completed_slot"] = slot
                 task_state["last_result"] = "launch_failure"
                 self._save()
+                failure_count = self.launch_failure_count.get(task, 0) + 1
+                self.launch_failure_count[task] = failure_count
+                retry_delay_s = _launch_retry_delay_s(failure_count)
+                self.launch_retry_after[task] = now + timedelta(
+                    seconds=retry_delay_s
+                )
                 changed = True
                 _emit(
                     {
                         "maintenance_scheduler": {
                             "error": type(error).__name__,
                             "event": "launch_error",
+                            "retry_in_s": retry_delay_s,
                             "slot": slot,
                             "task": task,
                         }
@@ -482,6 +503,11 @@ class MaintenanceScheduler:
                     error=True,
                 )
                 continue
+            task_state["last_started_slot"] = slot
+            task_state["last_result"] = "running"
+            self._save()
+            self.launch_failure_count.pop(task, None)
+            self.launch_retry_after.pop(task, None)
             self.running[task] = RunningTask(process=process, slot=slot)
             changed = True
             _emit(
