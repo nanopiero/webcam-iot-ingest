@@ -203,10 +203,9 @@ collapses missed intervals into one catch-up execution after downtime.
 
 The optional production `webcam-stack.service` in
 `deployment/systemd/pilot/` may start and stop the complete Compose stack at
-VM boot. It is the only supported systemd unit in this repository: systemd
-does not schedule maintenance or launch host Python workers. Older
-installations must disable and remove superseded discovery, maintenance,
-cleanup, backup, and checkpoint timers to avoid duplicate executions.
+VM boot. It is the only supported application systemd unit: Compose still owns
+the workers, restart policies, and maintenance schedule. No systemd timer or
+host-managed ingestion worker is required.
 
 Before production promotion, start the same runtime with a recorded three-day
 observation window:
